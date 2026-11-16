@@ -17,7 +17,7 @@ use std::{
 };
 use url::Url;
 
-pub const APP: &str = "Sysola";
+pub const APP: &str = "Nyxar";
 
 /// Домены, которые при включённой опции идут напрямую, мимо VPN.
 pub const RU_DIRECT: &[&str] = &[
@@ -127,7 +127,7 @@ pub fn fetch_links(src: &str) -> Result<Vec<String>, String> {
     let text = if src.starts_with("http://") || src.starts_with("https://") {
         ureq::get(src)
             .timeout(Duration::from_secs(15))
-            .set("User-Agent", "sysola")
+            .set("User-Agent", "nyxar")
             .call()
             .map_err(|e| format!("Не удалось скачать подписку: {e}"))?
             .into_string()

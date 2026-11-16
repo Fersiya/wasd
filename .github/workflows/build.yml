@@ -22,7 +22,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory dist -Force | Out-Null
-          Copy-Item target\release\sysola.exe dist\
+          Copy-Item target\release\nyxar.exe dist\
 
           $rel = Invoke-RestMethod https://api.github.com/repos/SagerNet/sing-box/releases/latest
           $asset = $rel.assets | Where-Object { $_.name -like '*windows-amd64.zip' } | Select-Object -First 1
@@ -46,6 +46,6 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: sysola-windows-x64
+          name: nyxar-windows-x64
           path: dist/*
           if-no-files-found: error

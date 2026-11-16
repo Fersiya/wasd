@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-title Сборка и подготовка Sysola
+title Сборка и подготовка Nyxar
 echo ===================================================
 echo   1. Проверка и скачивание ядра sing-box.exe...
 echo ===================================================
@@ -21,16 +21,16 @@ if not exist "sing-box.exe" (
 
 echo.
 echo ===================================================
-echo   2. Компиляция ультралегкого sysola.exe...
+echo   2. Компиляция ультралегкого nyxar.exe...
 echo ===================================================
 cargo build --release
 
-if exist "target\release\sysola.exe" (
-    copy /Y "target\release\sysola.exe" ".\sysola.exe" >nul
+if exist "target\release\nyxar.exe" (
+    copy /Y "target\release\nyxar.exe" ".\nyxar.exe" >nul
     echo.
-    echo [ГОТОВО!] Файлы sysola.exe и sing-box.exe готовы к работе!
+    echo [ГОТОВО!] Файлы nyxar.exe и sing-box.exe готовы к работе!
     echo Запускаю клиент...
-    start "" ".\sysola.exe"
+    start "" ".\nyxar.exe"
 ) else (
     echo.
     echo [ОШИБКА] Не удалось собрать проект. Убедитесь, что установлен Rust (rustup.rs).
