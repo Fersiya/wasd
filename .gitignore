@@ -1,0 +1,10 @@
+/target
+/dist
+sing-box.exe
+wintun.dll
+config.json
+settings.json
+sing-box.log
+sb.zip
+sb_tmp/
+rust-light-vpn.exe

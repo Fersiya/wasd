@@ -14,6 +14,9 @@ percent-encoding = "2.3"
 base64 = "0.22"
 ureq = "2.10"
 
+[build-dependencies]
+embed-manifest = "1.4"
+
 [profile.release]
 opt-level = "z"
 lto = true

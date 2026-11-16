@@ -1,0 +1,51 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Collect files (sing-box + wintun)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist -Force | Out-Null
+          Copy-Item target\release\rust-light-vpn.exe dist\
+
+          $rel = Invoke-RestMethod https://api.github.com/repos/SagerNet/sing-box/releases/latest
+          $asset = $rel.assets | Where-Object { $_.name -like '*windows-amd64.zip' } | Select-Object -First 1
+          Write-Host "sing-box:" $asset.name
+          Invoke-WebRequest $asset.browser_download_url -OutFile sb.zip
+          Expand-Archive sb.zip -DestinationPath sb_tmp -Force
+          $exe = Get-ChildItem sb_tmp -Filter sing-box.exe -Recurse | Select-Object -First 1
+          Copy-Item $exe.FullName dist\sing-box.exe
+          # если в архиве есть dll рядом с ядром, кладём их тоже
+          Get-ChildItem $exe.DirectoryName -Filter *.dll | ForEach-Object { Copy-Item $_.FullName dist\ }
+
+          # wintun.dll нужен TUN-адаптеру на Windows
+          try {
+            Invoke-WebRequest https://www.wintun.net/builds/wintun-0.14.1.zip -OutFile wintun.zip
+            Expand-Archive wintun.zip -DestinationPath wintun_tmp -Force
+            Copy-Item wintun_tmp\wintun\bin\amd64\wintun.dll dist\wintun.dll -Force
+          } catch {
+            Write-Warning "wintun.dll не скачался: $_"
+          }
+          Get-ChildItem dist | Format-Table Name, Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rust-light-vpn-windows-x64
+          path: dist/*
+          if-no-files-found: error
