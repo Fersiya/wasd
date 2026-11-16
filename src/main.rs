@@ -1,17 +1,10 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
-use base64::{
-    engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD},
-    Engine,
-};
-use percent_encoding::percent_decode_str;
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+mod engine;
+
+use engine::{Server, Settings, APP};
 use std::{
-    collections::HashMap,
-    fs,
-    path::PathBuf,
-    process::{Child, Command, Stdio},
+    process::Child,
     time::{Duration, Instant},
 };
 use tao::{
@@ -21,265 +14,25 @@ use tao::{
     window::{Window, WindowBuilder},
 };
 use tray_icon::{
-    menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
+    menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu},
     Icon, TrayIcon, TrayIconBuilder,
 };
-use url::Url;
 use wry::{WebView, WebViewBuilder};
-
-// ───────────────────────── настройки ─────────────────────────
-
-#[derive(Serialize, Deserialize, Default)]
-struct Settings {
-    #[serde(default)]
-    link: String,
-}
-
-fn base_dir() -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-        .unwrap_or_else(|| PathBuf::from("."))
-}
-
-fn load_settings() -> Settings {
-    fs::read_to_string(base_dir().join("settings.json"))
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
-}
-
-fn save_settings(s: &Settings) {
-    if let Ok(text) = serde_json::to_string_pretty(s) {
-        let _ = fs::write(base_dir().join("settings.json"), text);
-    }
-}
-
-// ───────────────────── vless:// и подписки ─────────────────────
-
-fn decode_maybe_b64(text: &str) -> String {
-    if text.contains("vless://") {
-        return text.to_string();
-    }
-    let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
-    for engine in [&STANDARD, &STANDARD_NO_PAD, &URL_SAFE, &URL_SAFE_NO_PAD] {
-        if let Ok(bytes) = engine.decode(compact.as_bytes()) {
-            if let Ok(s) = String::from_utf8(bytes) {
-                return s;
-            }
-        }
-    }
-    text.to_string()
-}
-
-/// Принимает vless:// ссылку, несколько ссылок или URL подписки.
-fn fetch_links(src: &str) -> Result<Vec<String>, String> {
-    let src = src.trim();
-    if src.is_empty() {
-        return Err("Ссылка не задана: открой «Настройки»".into());
-    }
-    let text = if src.starts_with("http://") || src.starts_with("https://") {
-        ureq::get(src)
-            .timeout(Duration::from_secs(15))
-            .set("User-Agent", "rust-light-vpn")
-            .call()
-            .map_err(|e| format!("Не удалось скачать подписку: {e}"))?
-            .into_string()
-            .map_err(|e| format!("Подписка не читается: {e}"))?
-    } else {
-        src.to_string()
-    };
-    let links: Vec<String> = decode_maybe_b64(&text)
-        .lines()
-        .map(str::trim)
-        .filter(|l| l.starts_with("vless://"))
-        .map(String::from)
-        .collect();
-    if links.is_empty() {
-        Err("Не нашёл ни одной ссылки vless://".into())
-    } else {
-        Ok(links)
-    }
-}
-
-/// Возвращает outbound для sing-box и имя сервера (из #фрагмента).
-fn vless_outbound(link: &str) -> Result<(Value, String), String> {
-    let u = Url::parse(link.trim()).map_err(|e| format!("Неверная ссылка: {e}"))?;
-    if u.scheme() != "vless" {
-        return Err("Нужна ссылка vless://".into());
-    }
-    let host = u
-        .host_str()
-        .ok_or("В ссылке нет адреса сервера")?
-        .trim_matches(|c| c == '[' || c == ']')
-        .to_string();
-    let port = u.port().unwrap_or(443);
-    let uuid = percent_decode_str(u.username()).decode_utf8_lossy().to_string();
-    if uuid.is_empty() {
-        return Err("В ссылке нет UUID".into());
-    }
-    let name = percent_decode_str(u.fragment().unwrap_or(""))
-        .decode_utf8_lossy()
-        .to_string();
-
-    let q: HashMap<String, String> = u.query_pairs().into_owned().collect();
-    let g = |k: &str| q.get(k).map(|s| s.as_str()).unwrap_or("");
-
-    let mut out = json!({
-        "type": "vless",
-        "tag": "proxy",
-        "server": host,
-        "server_port": port,
-        "uuid": uuid,
-        "packet_encoding": "xudp",
-    });
-    if !g("flow").is_empty() {
-        out["flow"] = json!(g("flow"));
-    }
-
-    let sni = if !g("sni").is_empty() {
-        g("sni").to_string()
-    } else if !g("host").is_empty() {
-        g("host").to_string()
-    } else {
-        host.clone()
-    };
-    let fp = if g("fp").is_empty() { "chrome" } else { g("fp") };
-
-    match g("security") {
-        "reality" => {
-            out["tls"] = json!({
-                "enabled": true,
-                "server_name": sni,
-                "utls": { "enabled": true, "fingerprint": fp },
-                "reality": {
-                    "enabled": true,
-                    "public_key": g("pbk"),
-                    "short_id": g("sid"),
-                }
-            });
-        }
-        "tls" => {
-            let mut tls = json!({
-                "enabled": true,
-                "server_name": sni,
-                "utls": { "enabled": true, "fingerprint": fp },
-            });
-            if !g("alpn").is_empty() {
-                tls["alpn"] = json!(g("alpn").split(',').collect::<Vec<_>>());
-            }
-            out["tls"] = tls;
-        }
-        _ => {}
-    }
-
-    match g("type") {
-        "ws" => {
-            let mut t = json!({ "type": "ws", "path": if g("path").is_empty() { "/" } else { g("path") } });
-            if !g("host").is_empty() {
-                t["headers"] = json!({ "Host": g("host") });
-            }
-            out["transport"] = t;
-        }
-        "grpc" => {
-            out["transport"] = json!({ "type": "grpc", "service_name": g("serviceName") });
-        }
-        _ => {}
-    }
-
-    Ok((out, name))
-}
-
-fn build_config(outbound: Value) -> Value {
-    json!({
-        "log": { "level": "warn", "timestamp": true },
-        "dns": {
-            "servers": [
-                { "tag": "remote", "type": "https", "server": "1.1.1.1", "detour": "proxy" },
-                { "tag": "local", "type": "udp", "server": "77.88.8.8" }
-            ],
-            "final": "remote"
-        },
-        "inbounds": [{
-            "type": "tun",
-            "tag": "tun-in",
-            "address": ["172.19.0.1/30"],
-            "auto_route": true,
-            "strict_route": true,
-            "stack": "mixed"
-        }],
-        "outbounds": [
-            outbound,
-            { "type": "direct", "tag": "direct" }
-        ],
-        "route": {
-            "auto_detect_interface": true,
-            "default_domain_resolver": "local",
-            "final": "proxy",
-            "rules": [
-                { "action": "sniff" },
-                { "protocol": "dns", "action": "hijack-dns" },
-                { "ip_is_private": true, "action": "route", "outbound": "direct" }
-            ]
-        }
-    })
-}
-
-// ───────────────────────── sing-box ─────────────────────────
-
-fn start_core(src: &str) -> Result<(Child, String), String> {
-    let dir = base_dir();
-    let core = dir.join(if cfg!(windows) { "sing-box.exe" } else { "sing-box" });
-    if !core.exists() {
-        return Err("Рядом с программой нет sing-box.exe".into());
-    }
-
-    let links = fetch_links(src)?;
-    let (outbound, name) = vless_outbound(&links[0])?;
-    let cfg = build_config(outbound);
-
-    let cfg_path = dir.join("config.json");
-    fs::write(&cfg_path, serde_json::to_string_pretty(&cfg).unwrap_or_default())
-        .map_err(|e| format!("Не записался config.json: {e}"))?;
-
-    let log = fs::File::create(dir.join("sing-box.log"))
-        .map_err(|e| format!("Не создался sing-box.log: {e}"))?;
-    let log_err = log
-        .try_clone()
-        .map_err(|e| format!("Не создался sing-box.log: {e}"))?;
-
-    let mut cmd = Command::new(core);
-    cmd.arg("run")
-        .arg("-c")
-        .arg(&cfg_path)
-        .current_dir(&dir)
-        .stdin(Stdio::null())
-        .stdout(log)
-        .stderr(log_err);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-    }
-    let child = cmd
-        .spawn()
-        .map_err(|e| format!("Не запустился sing-box: {e}"))?;
-    Ok((child, name))
-}
-
-fn stop_core(child: &mut Option<Child>) {
-    if let Some(mut c) = child.take() {
-        let _ = c.kill();
-        let _ = c.wait();
-    }
-}
-
-// ─────────────────────────── UI ───────────────────────────
 
 enum UserEvent {
     Menu(MenuEvent),
     Save(String),
     Started(Result<(Child, String), String>),
+    Servers(Result<Vec<Server>, String>),
+}
+
+// ─────────────────────────── helpers ───────────────────────────
+
+fn notify(title: &str, body: &str) {
+    let (t, b) = (title.to_string(), body.to_string());
+    std::thread::spawn(move || {
+        let _ = notify_rust::Notification::new().summary(&t).body(&b).show();
+    });
 }
 
 fn make_icon(on: bool) -> Icon {
@@ -311,15 +64,79 @@ fn apply_state(
     toggle.set_text(if on { "Отключить" } else { "Подключить" });
     if let Some(t) = tray {
         let _ = t.set_icon(Some(make_icon(on)));
-        let _ = t.set_tooltip(Some(format!("Rust Light VPN — {text}")));
+        let _ = t.set_tooltip(Some(format!("{APP} — {text}")));
     }
 }
 
-fn begin_connect(proxy: &EventLoopProxy<UserEvent>, src: String) {
+fn begin_connect(proxy: &EventLoopProxy<UserEvent>, settings: &Settings) {
+    let p = proxy.clone();
+    let s = settings.clone();
+    std::thread::spawn(move || {
+        let _ = p.send_event(UserEvent::Started(engine::start_core(&s)));
+    });
+}
+
+fn begin_refresh(proxy: &EventLoopProxy<UserEvent>, link: String) {
+    if link.trim().is_empty() {
+        return;
+    }
     let p = proxy.clone();
     std::thread::spawn(move || {
-        let _ = p.send_event(UserEvent::Started(start_core(&src)));
+        let res = engine::load_servers(&link).map(|mut list| {
+            engine::ping_all(&mut list);
+            list
+        });
+        let _ = p.send_event(UserEvent::Servers(res));
     });
+}
+
+fn restart(
+    proxy: &EventLoopProxy<UserEvent>,
+    settings: &Settings,
+    child: &mut Option<Child>,
+    connecting: &mut bool,
+    status: &MenuItem,
+) {
+    engine::stop_core(child);
+    if !*connecting {
+        *connecting = true;
+        status.set_text("подключение…");
+        begin_connect(proxy, settings);
+    }
+}
+
+/// Перестраивает подменю «Сервер»: Авто, список с пингом, обновление.
+fn fill_servers(
+    sub: &Submenu,
+    auto: &CheckMenuItem,
+    refresh: &MenuItem,
+    servers: &[Server],
+    selected: &str,
+) -> Vec<(CheckMenuItem, String)> {
+    for it in sub.items() {
+        let _ = sub.remove(&it);
+    }
+    auto.set_checked(selected == "auto");
+    let _ = sub.append(auto);
+    let _ = sub.append(&PredefinedMenuItem::separator());
+    let mut items = Vec::new();
+    for s in servers {
+        let item = CheckMenuItem::new(s.label(), true, s.key() == selected, None);
+        let _ = sub.append(&item);
+        items.push((item, s.key()));
+    }
+    if !servers.is_empty() {
+        let _ = sub.append(&PredefinedMenuItem::separator());
+    }
+    let _ = sub.append(refresh);
+    items
+}
+
+fn mark_selected(auto: &CheckMenuItem, items: &[(CheckMenuItem, String)], selected: &str) {
+    auto.set_checked(selected == "auto");
+    for (item, key) in items {
+        item.set_checked(key == selected);
+    }
 }
 
 fn settings_html(link: &str) -> String {
@@ -337,7 +154,7 @@ fn settings_html(link: &str) -> String {
            background: #2ecc71; color: #111; font-weight: 600; cursor: pointer; }
 </style>
 <b>Ссылка на подписку или vless://</b>
-<p>Подойдёт ключ <code>vless://…</code> или URL подписки. Берётся первый сервер.</p>
+<p>Подойдёт ключ <code>vless://…</code> или URL подписки. Сервер выбирается в меню трея.</p>
 <textarea id="l" spellcheck="false"></textarea><br>
 <button onclick="save()">Сохранить и подключить</button>
 <script>
@@ -346,6 +163,8 @@ fn settings_html(link: &str) -> String {
 </script>"##
         .replace("__LINK__", &link_js)
 }
+
+// ──────────────────────────── main ────────────────────────────
 
 fn main() {
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
@@ -357,32 +176,55 @@ fn main() {
         }));
     }
 
-    let status = MenuItem::new("Отключено", false, None);
+    let mut settings = engine::load_settings();
+
+    let status = MenuItem::new("отключено", false, None);
     let toggle = MenuItem::new("Подключить", true, None);
-    let settings_item = MenuItem::new("Настройки…", true, None);
+    let server_menu = Submenu::new("Сервер", true);
+    let auto_item = CheckMenuItem::new("Авто (лучший пинг)", true, settings.server == "auto", None);
+    let refresh_item = MenuItem::new("Обновить список и пинг", true, None);
+    let settings_item = MenuItem::new("Ссылка и подписка…", true, None);
+    let ru_item = CheckMenuItem::new("Россия напрямую", true, settings.bypass_ru, None);
+    let autostart_item =
+        CheckMenuItem::new("Запускать с Windows", true, engine::autostart_enabled(), None);
+    let autoconnect_item =
+        CheckMenuItem::new("Подключаться при запуске", true, settings.autoconnect, None);
     let quit = MenuItem::new("Выход", true, None);
+
+    let mut server_items = fill_servers(&server_menu, &auto_item, &refresh_item, &[], &settings.server);
 
     let menu = Menu::new();
     let _ = menu.append(&status);
     let _ = menu.append(&PredefinedMenuItem::separator());
     let _ = menu.append(&toggle);
+    let _ = menu.append(&server_menu);
     let _ = menu.append(&settings_item);
+    let _ = menu.append(&PredefinedMenuItem::separator());
+    let _ = menu.append(&ru_item);
+    let _ = menu.append(&autostart_item);
+    let _ = menu.append(&autoconnect_item);
     let _ = menu.append(&PredefinedMenuItem::separator());
     let _ = menu.append(&quit);
 
     let mut tray = Some(
         TrayIconBuilder::new()
             .with_menu(Box::new(menu))
-            .with_tooltip("Rust Light VPN — отключено")
+            .with_tooltip(format!("{APP} — отключено"))
             .with_icon(make_icon(false))
             .build()
             .expect("не удалось создать иконку в трее"),
     );
 
-    let mut settings = load_settings();
     let mut child: Option<Child> = None;
     let mut connecting = false;
     let mut win: Option<(Window, WebView)> = None;
+
+    begin_refresh(&proxy, settings.link.clone());
+    if settings.autoconnect && !settings.link.trim().is_empty() {
+        connecting = true;
+        status.set_text("подключение…");
+        begin_connect(&proxy, &settings);
+    }
 
     event_loop.run(move |event, target, control_flow| {
         *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_secs(2));
@@ -393,33 +235,32 @@ fn main() {
                 if let Some(c) = child.as_mut() {
                     if let Ok(Some(code)) = c.try_wait() {
                         child = None;
-                        apply_state(
-                            &tray,
-                            &status,
-                            &toggle,
-                            false,
-                            &format!("ядро остановилось ({code}), см. sing-box.log"),
-                        );
+                        apply_state(&tray, &status, &toggle, false, "соединение оборвалось");
+                        notify(APP, &format!("Соединение оборвалось ({code}). Подробности в sing-box.log"));
                     }
                 }
             }
 
             Event::UserEvent(UserEvent::Menu(e)) => {
-                if e.id == *toggle.id() {
+                let id = e.id.clone();
+                let mut new_server: Option<String> = None;
+                let mut changed_routing = false;
+
+                if id == *toggle.id() {
                     if child.is_some() {
-                        stop_core(&mut child);
+                        engine::stop_core(&mut child);
                         apply_state(&tray, &status, &toggle, false, "отключено");
                     } else if !connecting {
                         connecting = true;
                         status.set_text("подключение…");
-                        begin_connect(&proxy, settings.link.clone());
+                        begin_connect(&proxy, &settings);
                     }
-                } else if e.id == *settings_item.id() {
+                } else if id == *settings_item.id() {
                     if let Some((w, _)) = win.as_ref() {
                         w.set_focus();
                     } else {
                         let window = WindowBuilder::new()
-                            .with_title("Rust Light VPN — настройки")
+                            .with_title(format!("{APP} — ссылка и подписка"))
                             .with_inner_size(LogicalSize::new(520.0, 330.0))
                             .with_resizable(false)
                             .build(target)
@@ -434,23 +275,61 @@ fn main() {
                             .expect("webview");
                         win = Some((window, webview));
                     }
-                } else if e.id == *quit.id() {
-                    stop_core(&mut child);
+                } else if id == *refresh_item.id() {
+                    begin_refresh(&proxy, settings.link.clone());
+                } else if id == *auto_item.id() {
+                    new_server = Some("auto".into());
+                } else if let Some((_, key)) = server_items.iter().find(|(i, _)| id == *i.id()) {
+                    new_server = Some(key.clone());
+                } else if id == *ru_item.id() {
+                    settings.bypass_ru = ru_item.is_checked();
+                    engine::save_settings(&settings);
+                    changed_routing = true;
+                } else if id == *autoconnect_item.id() {
+                    settings.autoconnect = autoconnect_item.is_checked();
+                    engine::save_settings(&settings);
+                } else if id == *autostart_item.id() {
+                    let want = autostart_item.is_checked();
+                    if let Err(msg) = engine::set_autostart(want) {
+                        autostart_item.set_checked(!want);
+                        notify(APP, &msg);
+                    }
+                } else if id == *quit.id() {
+                    engine::stop_core(&mut child);
                     win = None;
                     tray = None;
                     *control_flow = ControlFlow::Exit;
+                    return;
+                }
+
+                if let Some(key) = new_server {
+                    settings.server = key;
+                    engine::save_settings(&settings);
+                    mark_selected(&auto_item, &server_items, &settings.server);
+                    changed_routing = true;
+                }
+                if changed_routing && child.is_some() {
+                    restart(&proxy, &settings, &mut child, &mut connecting, &status);
                 }
             }
 
             Event::UserEvent(UserEvent::Save(link)) => {
                 settings.link = link;
-                save_settings(&settings);
+                engine::save_settings(&settings);
                 win = None;
-                stop_core(&mut child);
-                if !connecting {
-                    connecting = true;
-                    status.set_text("подключение…");
-                    begin_connect(&proxy, settings.link.clone());
+                begin_refresh(&proxy, settings.link.clone());
+                restart(&proxy, &settings, &mut child, &mut connecting, &status);
+            }
+
+            Event::UserEvent(UserEvent::Servers(result)) => {
+                if let Ok(list) = result {
+                    server_items = fill_servers(
+                        &server_menu,
+                        &auto_item,
+                        &refresh_item,
+                        &list,
+                        &settings.server,
+                    );
                 }
             }
 
@@ -458,15 +337,15 @@ fn main() {
                 connecting = false;
                 match result {
                     Ok((c, name)) => {
+                        engine::stop_core(&mut child); // на случай гонки двух подключений
                         child = Some(c);
-                        let label = if name.is_empty() {
-                            "подключено".to_string()
-                        } else {
-                            format!("подключено: {name}")
-                        };
-                        apply_state(&tray, &status, &toggle, true, &label);
+                        apply_state(&tray, &status, &toggle, true, &format!("подключено: {name}"));
+                        notify(APP, &format!("Подключено: {name}"));
                     }
-                    Err(msg) => apply_state(&tray, &status, &toggle, false, &msg),
+                    Err(msg) => {
+                        apply_state(&tray, &status, &toggle, false, "ошибка");
+                        notify(&format!("{APP} — ошибка"), &msg);
+                    }
                 }
             }
 

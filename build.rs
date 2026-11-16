@@ -8,7 +8,7 @@ fn main() {
     let skip = std::env::var_os("SKIP_MANIFEST").is_some();
     if target_windows && !skip {
         embed_manifest(
-            new_manifest("RustLightVpn")
+            new_manifest("Sysola")
                 .requested_execution_level(ExecutionLevel::RequireAdministrator),
         )
         .expect("не удалось встроить манифест");

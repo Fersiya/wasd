@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-title Сборка и подготовка Rust Light VPN
+title Сборка и подготовка Sysola
 echo ===================================================
 echo   1. Проверка и скачивание ядра sing-box.exe...
 echo ===================================================
@@ -21,16 +21,16 @@ if not exist "sing-box.exe" (
 
 echo.
 echo ===================================================
-echo   2. Компиляция ультралегкого rust-light-vpn.exe...
+echo   2. Компиляция ультралегкого sysola.exe...
 echo ===================================================
 cargo build --release
 
-if exist "target\release\rust-light-vpn.exe" (
-    copy /Y "target\release\rust-light-vpn.exe" ".\rust-light-vpn.exe" >nul
+if exist "target\release\sysola.exe" (
+    copy /Y "target\release\sysola.exe" ".\sysola.exe" >nul
     echo.
-    echo [ГОТОВО!] Файлы rust-light-vpn.exe и sing-box.exe готовы к работе!
+    echo [ГОТОВО!] Файлы sysola.exe и sing-box.exe готовы к работе!
     echo Запускаю клиент...
-    start "" ".\rust-light-vpn.exe"
+    start "" ".\sysola.exe"
 ) else (
     echo.
     echo [ОШИБКА] Не удалось собрать проект. Убедитесь, что установлен Rust (rustup.rs).
