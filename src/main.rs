@@ -113,9 +113,7 @@ fn fill_servers(
     servers: &[Server],
     selected: &str,
 ) -> Vec<(CheckMenuItem, String)> {
-    for it in sub.items() {
-        let _ = sub.remove(&it);
-    }
+    while sub.remove_at(0).is_some() {}
     auto.set_checked(selected == "auto");
     let _ = sub.append(auto);
     let _ = sub.append(&PredefinedMenuItem::separator());
