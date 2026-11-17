@@ -3,7 +3,11 @@ name: build
 on:
   push:
     branches: [main]
+    tags: ['v*']
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -15,14 +19,12 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build
-        run: cargo build --release
-
-      - name: Collect files (sing-box + wintun)
+      # sing-box, wintun и libcronet скачиваются и вшиваются в nyxar.exe (gzip) -> единый файл
+      - name: Fetch core and pack into assets
         shell: pwsh
         run: |
-          New-Item -ItemType Directory dist -Force | Out-Null
-          Copy-Item target\release\nyxar.exe dist\
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory assets, core -Force | Out-Null
 
           $rel = Invoke-RestMethod https://api.github.com/repos/SagerNet/sing-box/releases/latest
           $asset = $rel.assets | Where-Object { $_.name -like '*windows-amd64.zip' } | Select-Object -First 1
@@ -30,18 +32,51 @@ jobs:
           Invoke-WebRequest $asset.browser_download_url -OutFile sb.zip
           Expand-Archive sb.zip -DestinationPath sb_tmp -Force
           $exe = Get-ChildItem sb_tmp -Filter sing-box.exe -Recurse | Select-Object -First 1
-          Copy-Item $exe.FullName dist\sing-box.exe
-          # если в архиве есть dll рядом с ядром, кладём их тоже
-          Get-ChildItem $exe.DirectoryName -Filter *.dll | ForEach-Object { Copy-Item $_.FullName dist\ }
+          Copy-Item $exe.FullName core\sing-box.exe
+          $cronet = Join-Path $exe.DirectoryName 'libcronet.dll'
+          if (Test-Path $cronet) { Copy-Item $cronet core\libcronet.dll } else { New-Item core\libcronet.dll -ItemType File | Out-Null }
 
-          # wintun.dll нужен TUN-адаптеру на Windows
-          try {
-            Invoke-WebRequest https://www.wintun.net/builds/wintun-0.14.1.zip -OutFile wintun.zip
-            Expand-Archive wintun.zip -DestinationPath wintun_tmp -Force
-            Copy-Item wintun_tmp\wintun\bin\amd64\wintun.dll dist\wintun.dll -Force
-          } catch {
-            Write-Warning "wintun.dll не скачался: $_"
+          Invoke-WebRequest https://www.wintun.net/builds/wintun-0.14.1.zip -OutFile wintun.zip
+          Expand-Archive wintun.zip -DestinationPath wintun_tmp -Force
+          Copy-Item wintun_tmp\wintun\bin\amd64\wintun.dll core\wintun.dll
+
+          foreach ($f in Get-ChildItem core -File) {
+            $in = [IO.File]::OpenRead($f.FullName)
+            $out = [IO.File]::Create("assets\$($f.Name).gz")
+            $gz = New-Object IO.Compression.GZipStream($out, [IO.Compression.CompressionLevel]::SmallestSize)
+            $in.CopyTo($gz)
+            $gz.Dispose(); $out.Dispose(); $in.Dispose()
           }
+          Get-ChildItem assets | Format-Table Name, Length
+
+      - name: Test
+        run: cargo test --features embed
+
+      - name: Build single exe
+        run: cargo build --release --features embed
+
+      - name: Version
+        id: ver
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -like 'refs/tags/v*') {
+            $v = $env:GITHUB_REF_NAME.TrimStart('v')
+          } else {
+            $v = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          }
+          "version=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Installer
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist -Force | Out-Null
+          Copy-Item target\release\nyxar.exe dist\nyxar.exe
+          $iscc = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+          }
+          & $iscc "/DAppVersion=${{ steps.ver.outputs.version }}" installer\nyxar.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed: $LASTEXITCODE" }
           Get-ChildItem dist | Format-Table Name, Length
 
       - uses: actions/upload-artifact@v4
@@ -49,3 +84,20 @@ jobs:
           name: nyxar-windows-x64
           path: dist/*
           if-no-files-found: error
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $v = '${{ steps.ver.outputs.version }}'
+          $notes = @"
+          Nyxar $v
+
+          - ``Nyxar-Setup-$v.exe``: установщик (ярлык в меню «Пуск», удаление через «Приложения»)
+          - ``nyxar.exe``: один файл без установки, запускать от администратора
+
+          Ядро sing-box и драйвер wintun уже внутри. При первом запуске они распаковываются в ``%LOCALAPPDATA%\Nyxar``.
+          "@
+          gh release create $env:GITHUB_REF_NAME dist\nyxar.exe "dist\Nyxar-Setup-$v.exe" --title "Nyxar $v" --notes $notes

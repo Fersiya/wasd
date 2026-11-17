@@ -66,8 +66,84 @@ pub fn base_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// Куда писать settings.json, config.json и лог.
+/// Portable: если рядом с exe лежит sing-box.exe (или файл `portable`), всё хранится рядом.
+/// Иначе — %LOCALAPPDATA%\Nyxar (обычная установка и единый exe).
+pub fn data_dir() -> PathBuf {
+    let base = base_dir();
+    let portable = base.join("sing-box.exe").exists() || base.join("portable").exists();
+    if !portable {
+        if let Some(d) = std::env::var_os("LOCALAPPDATA") {
+            let p = PathBuf::from(d).join(APP);
+            if fs::create_dir_all(&p).is_ok() {
+                return p;
+            }
+        }
+    }
+    base
+}
+
+#[allow(dead_code)]
+fn unpack(gz: &[u8]) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut out = Vec::new();
+    flate2::read::GzDecoder::new(gz).read_to_end(&mut out)?;
+    Ok(out)
+}
+
+/// Файлы, вшитые в exe (сжатые gzip). Пустой файл после распаковки пропускается.
+#[cfg(feature = "embed")]
+const CORE_FILES: &[(&str, &[u8])] = &[
+    ("sing-box.exe", include_bytes!("../assets/sing-box.exe.gz")),
+    ("wintun.dll", include_bytes!("../assets/wintun.dll.gz")),
+    ("libcronet.dll", include_bytes!("../assets/libcronet.dll.gz")),
+];
+
+/// Распаковывает вшитое ядро в <data>/core (один раз на версию программы).
+#[cfg(feature = "embed")]
+fn embedded_core() -> Option<Result<PathBuf, String>> {
+    let dir = data_dir().join("core");
+    let marker = dir.join(".version");
+    let core = dir.join("sing-box.exe");
+    let ver = env!("CARGO_PKG_VERSION");
+    if core.exists() && fs::read_to_string(&marker).map(|v| v == ver).unwrap_or(false) {
+        return Some(Ok(core));
+    }
+    let res = (|| -> Result<PathBuf, String> {
+        fs::create_dir_all(&dir).map_err(|e| format!("Не создалась папка ядра: {e}"))?;
+        for (name, gz) in CORE_FILES {
+            let bytes = unpack(gz).map_err(|e| format!("Не распаковалось {name}: {e}"))?;
+            if bytes.is_empty() {
+                continue;
+            }
+            let tmp = dir.join(format!("{name}.new"));
+            fs::write(&tmp, &bytes).map_err(|e| format!("Не записался {name}: {e}"))?;
+            fs::rename(&tmp, dir.join(name)).map_err(|e| {
+                format!("Не удалось обновить {name} (закрой другие копии Nyxar): {e}")
+            })?;
+        }
+        fs::write(&marker, ver).map_err(|e| format!("Не записалась версия ядра: {e}"))?;
+        Ok(core.clone())
+    })();
+    Some(res)
+}
+
+#[cfg(not(feature = "embed"))]
+fn embedded_core() -> Option<Result<PathBuf, String>> {
+    None
+}
+
+/// Путь к sing-box: рядом с exe (portable) или вшитый в программу.
+pub fn core_path() -> Result<PathBuf, String> {
+    let side = base_dir().join(if cfg!(windows) { "sing-box.exe" } else { "sing-box" });
+    if side.exists() {
+        return Ok(side);
+    }
+    embedded_core().unwrap_or_else(|| Err("Рядом с программой нет sing-box.exe".into()))
+}
+
 pub fn load_settings() -> Settings {
-    fs::read_to_string(base_dir().join("settings.json"))
+    fs::read_to_string(data_dir().join("settings.json"))
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default()
@@ -75,7 +151,7 @@ pub fn load_settings() -> Settings {
 
 pub fn save_settings(s: &Settings) {
     if let Ok(text) = serde_json::to_string_pretty(s) {
-        let _ = fs::write(base_dir().join("settings.json"), text);
+        let _ = fs::write(data_dir().join("settings.json"), text);
     }
 }
 
@@ -362,11 +438,9 @@ fn hide_window(cmd: &mut Command) {
 
 /// Запускает ядро. Возвращает процесс и название выбранного сервера.
 pub fn start_core(s: &Settings) -> Result<(Child, String), String> {
-    let dir = base_dir();
-    let core = dir.join(if cfg!(windows) { "sing-box.exe" } else { "sing-box" });
-    if !core.exists() {
-        return Err("Рядом с программой нет sing-box.exe".into());
-    }
+    let core = core_path()?;
+    let core_dir = core.parent().map(|p| p.to_path_buf()).unwrap_or_else(base_dir);
+    let dir = data_dir();
 
     let mut servers = load_servers(&s.link)?;
     let known = s.server != "auto" && servers.iter().any(|x| x.key() == s.server);
@@ -392,7 +466,7 @@ pub fn start_core(s: &Settings) -> Result<(Child, String), String> {
     cmd.arg("run")
         .arg("-c")
         .arg(&cfg_path)
-        .current_dir(&dir)
+        .current_dir(&core_dir)
         .stdin(Stdio::null())
         .stdout(log)
         .stderr(log_err);
@@ -541,6 +615,28 @@ mod tests {
         assert_eq!(pick_server(&v, "auto").unwrap().host, "b");
         assert_eq!(pick_server(&v, "c:443").unwrap().host, "c");
         assert_eq!(pick_server(&v, "zzz:1").unwrap().host, "b");
+    }
+
+    #[test]
+    fn gzip_roundtrip() {
+        use std::io::Write;
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        enc.write_all(b"nyxar core bytes").unwrap();
+        let gz = enc.finish().unwrap();
+        assert_eq!(unpack(&gz).unwrap(), b"nyxar core bytes");
+    }
+
+    #[cfg(feature = "embed")]
+    #[test]
+    fn embedded_core_is_extracted() {
+        let tmp = std::env::temp_dir().join(format!("nyxar-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        std::env::set_var("LOCALAPPDATA", &tmp);
+        let p = core_path().unwrap();
+        assert!(p.ends_with("core/sing-box.exe") || p.ends_with("core\\sing-box.exe"));
+        assert!(p.exists());
+        assert!(core_path().unwrap() == p); // второй вызов берёт готовое
+        let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]

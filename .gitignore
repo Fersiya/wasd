@@ -1,10 +1,15 @@
 /target
 /dist
+/assets
+/core
 sing-box.exe
 wintun.dll
+libcronet.dll
 config.json
 settings.json
 sing-box.log
 sb.zip
 sb_tmp/
+wintun.zip
+wintun_tmp/
 nyxar.exe
