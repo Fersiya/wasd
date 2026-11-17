@@ -19,6 +19,7 @@ PrivilegesRequired=admin
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayIcon={app}\nyxar.exe
+SetupIconFile=..\res\nyxar.ico
 WizardStyle=modern
 
 [Languages]

@@ -477,6 +477,52 @@ pub fn start_core(s: &Settings) -> Result<(Child, String), String> {
     Ok((child, srv.name))
 }
 
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' && chars.peek() == Some(&'[') {
+            for n in chars.by_ref() {
+                if n.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Последние строки лога sing-box (показываются в окне при ошибке).
+pub fn log_tail(max_chars: usize) -> String {
+    let bytes = fs::read(data_dir().join("sing-box.log")).unwrap_or_default();
+    let text = strip_ansi(&String::from_utf8_lossy(&bytes));
+    let mut out: Vec<&str> = Vec::new();
+    let mut len = 0;
+    for line in text.lines().rev().filter(|l| !l.trim().is_empty()) {
+        len += line.len() + 1;
+        if len > max_chars && !out.is_empty() {
+            break;
+        }
+        out.push(line.trim());
+    }
+    out.reverse();
+    out.join("\n")
+}
+
+/// Открывает папку с настройками и логом.
+pub fn open_data_dir() {
+    let dir = data_dir();
+    let mut c = if cfg!(windows) {
+        Command::new("explorer")
+    } else {
+        Command::new("xdg-open")
+    };
+    c.arg(dir).stdout(Stdio::null()).stderr(Stdio::null());
+    let _ = c.spawn();
+}
+
 #[cfg(windows)]
 mod win {
     use std::{ptr, thread, time::Duration};
@@ -545,7 +591,7 @@ pub fn set_autostart(on: bool) -> Result<(), String> {
     if on {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         c.args(["/Create", "/TN", APP, "/TR"])
-            .arg(format!("\"{}\"", exe.display()))
+            .arg(format!("\"{}\" --minimized", exe.display()))
             .args(["/SC", "ONLOGON", "/RL", "HIGHEST", "/F"]);
     } else {
         c.args(["/Delete", "/TN", APP, "/F"]);
