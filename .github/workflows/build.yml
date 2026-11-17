@@ -86,12 +86,19 @@ jobs:
           if-no-files-found: error
 
       - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/v')
+        # релиз создаётся для версии из Cargo.toml (или из тега v*), если такого релиза ещё нет
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $v = '${{ steps.ver.outputs.version }}'
+          $tag = "v$v"
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "Релиз $tag уже существует, пропускаю"
+            exit 0
+          }
           $notes = @"
           Nyxar $v
 
@@ -100,4 +107,5 @@ jobs:
 
           Ядро sing-box и драйвер wintun уже внутри. При первом запуске они распаковываются в ``%LOCALAPPDATA%\Nyxar``.
           "@
-          gh release create $env:GITHUB_REF_NAME dist\nyxar.exe "dist\Nyxar-Setup-$v.exe" --title "Nyxar $v" --notes $notes
+          gh release create $tag dist\nyxar.exe "dist\Nyxar-Setup-$v.exe" --target $env:GITHUB_SHA --title "Nyxar $v" --notes $notes
+          if ($LASTEXITCODE -ne 0) { throw "gh release create failed: $LASTEXITCODE" }
