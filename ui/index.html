@@ -14,13 +14,19 @@
     margin: 0; background: var(--bg); color: var(--text); overflow-x: hidden;
     font: 14px/1.45 "Segoe UI", system-ui, sans-serif; user-select: none; -webkit-user-select: none;
   }
-  main { padding: 18px 20px 14px; }
+  main { padding: 18px 20px 14px; max-width: 640px; margin: 0 auto; }
   header { display: flex; align-items: center; gap: 10px; }
   header svg { width: 34px; height: 34px; }
   header b { font-size: 18px; letter-spacing: .2px; }
   header span { margin-left: auto; color: var(--mute); font-size: 12px; }
 
-  .hero { text-align: center; padding: 22px 0 6px; }
+  .banner {
+    display: none; align-items: center; gap: 10px; margin-top: 12px; padding: 9px 12px; border-radius: 12px;
+    background: rgba(34,211,238,.1); border: 1px solid rgba(34,211,238,.35); color: #a5f3fc;
+  }
+  .banner span { flex: 1; }
+
+  .hero { text-align: center; padding: 18px 0 6px; }
   #power {
     width: 132px; height: 132px; border-radius: 50%; border: 0; cursor: pointer; color: #fff;
     background: var(--off); display: inline-flex; align-items: center; justify-content: center;
@@ -41,33 +47,50 @@
   #sub { color: var(--mute); margin-top: 2px; min-height: 20px; }
 
   #err {
-    display: none; margin: 14px 0 0; padding: 10px 12px; border-radius: 10px; font-size: 12px;
+    display: none; margin: 14px 0 0; padding: 10px 12px; border-radius: 10px; font-size: 12px; text-align: left;
     background: rgba(251,146,60,.1); border: 1px solid rgba(251,146,60,.35); color: #fed7aa;
-    white-space: pre-wrap; word-break: break-word; max-height: 130px; overflow: auto;
+    white-space: pre-wrap; word-break: break-word; max-height: 140px; overflow: auto;
     user-select: text; -webkit-user-select: text; font-family: Consolas, monospace;
   }
 
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; margin-top: 14px; }
-  .card h3 { margin: 0 0 8px; font-size: 12px; font-weight: 600; color: var(--mute); text-transform: uppercase; letter-spacing: .6px; }
-  .row { display: flex; gap: 8px; }
-  select, textarea {
+  .hd { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; gap: 8px; }
+  .hd h3 { margin: 0; font-size: 12px; font-weight: 600; color: var(--mute); text-transform: uppercase; letter-spacing: .6px; }
+  .hd h3 em { font-style: normal; color: var(--a2); margin-left: 4px; }
+  textarea {
     width: 100%; background: #0f121a; color: var(--text); border: 1px solid var(--line); border-radius: 9px;
     padding: 9px 10px; font: inherit; outline: none; user-select: text; -webkit-user-select: text;
   }
-  select:focus, textarea:focus { border-color: var(--a1); }
-  textarea { height: 86px; resize: none; font: 12px Consolas, monospace; }
+  textarea:focus { border-color: var(--a1); }
+  textarea { height: 86px; resize: vertical; font: 12px Consolas, monospace; }
   button.ghost {
     background: #0f121a; color: var(--text); border: 1px solid var(--line); border-radius: 9px;
-    padding: 0 13px; cursor: pointer; font: inherit;
+    padding: 4px 11px; cursor: pointer; font: inherit; font-size: 13px;
   }
-  button.ghost:hover { border-color: var(--a1); }
+  button.ghost:hover:not(:disabled) { border-color: var(--a1); }
+  button.ghost:disabled { opacity: .55; cursor: default; }
   button.primary {
     margin-top: 10px; width: 100%; padding: 10px; border: 0; border-radius: 10px; cursor: pointer; color: #fff;
     font: inherit; font-weight: 600; background: linear-gradient(135deg, var(--a1), var(--a2));
   }
   button.primary:hover { filter: brightness(1.08); }
+  .spin { display: inline-block; animation: rot .8s linear infinite; }
+  @keyframes rot { to { transform: rotate(360deg); } }
 
-  label.t { display: flex; align-items: center; justify-content: space-between; padding: 7px 0; cursor: pointer; }
+  #srvlist { display: flex; flex-direction: column; gap: 4px; max-height: 250px; overflow-y: auto; }
+  .srv { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 10px; cursor: pointer; border: 1px solid transparent; }
+  .srv:hover { background: #1c2030; }
+  .srv.sel { background: rgba(109,91,255,.12); border-color: rgba(109,91,255,.5); }
+  .srv .dot { flex: none; width: 14px; height: 14px; border-radius: 50%; border: 2px solid #4a5268; }
+  .srv.sel .dot { border-color: var(--a1); background: radial-gradient(var(--a1) 0 42%, transparent 48%); }
+  .srv .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .srv .nm small { display: block; color: var(--mute); font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
+  .srv.live .nm { color: var(--ok); }
+  .ms { flex: none; font-size: 12px; padding: 2px 9px; border-radius: 20px; background: #0f121a; color: var(--mute); }
+  .ms.good { color: #4ade80; } .ms.mid { color: #fbbf24; } .ms.bad { color: #f87171; }
+  .empty { color: var(--mute); font-size: 13px; padding: 6px 2px; }
+
+  label.t { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 0; cursor: pointer; }
   label.t + label.t { border-top: 1px solid var(--line); }
   label.t small { display: block; color: var(--mute); font-size: 12px; }
   .sw { position: relative; flex: none; width: 40px; height: 22px; }
@@ -77,9 +100,17 @@
   .sw input:checked + i { background: linear-gradient(135deg, var(--a1), var(--a2)); }
   .sw input:checked + i::after { transform: translateX(18px); }
 
-  footer { display: flex; justify-content: space-between; align-items: center; margin-top: 14px; color: var(--mute); font-size: 12px; }
-  footer a { color: var(--a2); cursor: pointer; text-decoration: none; }
+  #logcard { display: none; }
+  #logbox {
+    margin: 0; max-height: 230px; overflow: auto; background: #0f121a; border: 1px solid var(--line); border-radius: 9px;
+    padding: 8px 10px; font: 11.5px/1.5 Consolas, monospace; color: #cbd2e1; white-space: pre-wrap; word-break: break-all;
+    user-select: text; -webkit-user-select: text;
+  }
+
+  footer { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center; margin-top: 14px; color: var(--mute); font-size: 12px; }
+  footer a { color: var(--a2); cursor: pointer; }
   footer a:hover { text-decoration: underline; }
+  #note { flex-basis: 100%; }
 </style>
 
 <main id="app">
@@ -93,6 +124,8 @@
     <span id="ver"></span>
   </header>
 
+  <div class="banner" id="upd"><span id="updtxt"></span><button class="ghost" id="updbtn">Обновить</button></div>
+
   <section class="hero">
     <button id="power" aria-label="Подключить или отключить">
       <svg viewBox="0 0 24 24"><path d="M12 3v8.5"/><path d="M7 6.2a8 8 0 1 0 10 0"/></svg>
@@ -103,32 +136,46 @@
   </section>
 
   <section class="card">
-    <h3>Сервер</h3>
-    <div class="row">
-      <select id="server"></select>
+    <div class="hd">
+      <h3>Серверы<em id="cnt"></em></h3>
       <button class="ghost" id="refresh" title="Обновить список и пинг" aria-label="Обновить список и пинг">↻</button>
     </div>
+    <div id="srvlist"></div>
   </section>
 
   <section class="card">
-    <h3>Параметры</h3>
+    <div class="hd"><h3>Параметры</h3></div>
     <label class="t"><span>Россия напрямую<small>.ru, .su, .рф и местные сервисы мимо VPN</small></span>
       <span class="sw"><input type="checkbox" id="bypass_ru"><i></i></span></label>
     <label class="t"><span>Запускать с Windows<small>сворачивается в трей</small></span>
       <span class="sw"><input type="checkbox" id="autostart"><i></i></span></label>
     <label class="t"><span>Подключаться при запуске</span>
       <span class="sw"><input type="checkbox" id="autoconnect"><i></i></span></label>
+    <label class="t"><span>Обновлять автоматически<small>с GitHub, когда VPN не подключён</small></span>
+      <span class="sw"><input type="checkbox" id="auto_update"><i></i></span></label>
+    <label class="t"><span>Подробный лог<small>для диагностики, файл быстро растёт</small></span>
+      <span class="sw"><input type="checkbox" id="verbose"><i></i></span></label>
   </section>
 
   <section class="card">
-    <h3>Ссылка или подписка</h3>
+    <div class="hd"><h3>Ссылка или подписка</h3></div>
     <textarea id="link" spellcheck="false" placeholder="vless://… или адрес подписки"></textarea>
     <button class="primary" id="save">Сохранить и подключить</button>
   </section>
 
+  <section class="card" id="logcard">
+    <div class="hd">
+      <h3>Лог ядра</h3>
+      <span><button class="ghost" id="logr">Обновить</button> <button class="ghost" id="logc">Копировать</button></span>
+    </div>
+    <pre id="logbox"></pre>
+  </section>
+
   <footer>
     <a id="log">Показать лог</a>
-    <span>Закрытие окна сворачивает в трей</span>
+    <a id="folder">Открыть папку</a>
+    <a id="chk">Проверить обновления</a>
+    <span id="note"></span>
   </footer>
 </main>
 
@@ -136,6 +183,41 @@
   const $ = (id) => document.getElementById(id);
   const send = (o) => window.ipc.postMessage(JSON.stringify(o));
   let first = true;
+  let cur = 'auto';
+
+  function row(key, name, sub, ping, live) {
+    const d = document.createElement('div');
+    d.className = 'srv' + (key === cur ? ' sel' : '') + (live ? ' live' : '');
+    const dot = document.createElement('i'); dot.className = 'dot';
+    const nm = document.createElement('span'); nm.className = 'nm';
+    nm.textContent = name + (live ? ' · подключено' : '');
+    if (sub) { const s = document.createElement('small'); s.textContent = sub; nm.appendChild(s); }
+    d.append(dot, nm);
+    if (key !== 'auto') {
+      const ms = document.createElement('span');
+      ms.className = 'ms ' + (ping == null ? 'bad' : ping < 120 ? 'good' : ping < 300 ? 'mid' : 'bad');
+      ms.textContent = ping == null ? 'нет ответа' : ping + ' мс';
+      d.appendChild(ms);
+    }
+    d.onclick = () => { cur = key; send({ cmd: 'server', key }); document.querySelectorAll('.srv').forEach((e) => e.classList.remove('sel')); d.classList.add('sel'); };
+    $('srvlist').appendChild(d);
+  }
+
+  function renderServers(s) {
+    $('srvlist').innerHTML = '';
+    const known = s.selected === 'auto' || s.servers.some((v) => v.key === s.selected);
+    cur = known ? s.selected : 'auto';
+    const best = s.servers.filter((v) => v.ping != null).sort((a, b) => a.ping - b.ping)[0];
+    row('auto', 'Авто', best ? 'сейчас лучший: ' + best.name + ' · ' + best.ping + ' мс' : 'выберется по пингу при подключении');
+    s.servers.forEach((v) => row(v.key, v.name, '', v.ping, v.key === s.connected_key));
+    if (!s.servers.length) {
+      const e = document.createElement('div'); e.className = 'empty';
+      e.textContent = s.link ? (s.refreshing ? 'Загружаю список…' : 'Серверов пока нет. Проверь ссылку и нажми ↻.') : 'Добавь ссылку на подписку ниже, и серверы появятся здесь.';
+      $('srvlist').appendChild(e);
+    }
+    $('cnt').textContent = s.servers.length ? s.servers.length : '';
+    $('refresh').classList.toggle('spin', !!s.refreshing);
+  }
 
   window.__state = function (s) {
     document.body.className = 'st-' + s.status;
@@ -144,32 +226,55 @@
     const e = $('err');
     e.style.display = s.error ? 'block' : 'none';
     e.textContent = s.error;
+    renderServers(s);
 
-    const sel = $('server');
-    sel.innerHTML = '';
-    const add = (v, t) => { const o = document.createElement('option'); o.value = v; o.textContent = t; sel.appendChild(o); };
-    add('auto', 'Авто: лучший пинг');
-    s.servers.forEach((v) => add(v.key, v.label));
-    sel.value = s.selected;
-    if (sel.value !== s.selected) sel.value = 'auto';
-
-    $('bypass_ru').checked = s.bypass_ru;
-    $('autostart').checked = s.autostart;
-    $('autoconnect').checked = s.autoconnect;
+    ['bypass_ru', 'autostart', 'autoconnect', 'auto_update', 'verbose'].forEach((k) => { $(k).checked = !!s[k]; });
     $('ver').textContent = 'v' + s.version;
+
+    const u = $('upd');
+    if (s.update) {
+      u.style.display = 'flex';
+      $('updtxt').textContent = s.update.busy ? 'Загружаю версию ' + s.update.version + '…' : 'Доступна версия ' + s.update.version;
+      $('updbtn').disabled = s.update.busy;
+    } else {
+      u.style.display = 'none';
+    }
+    $('note').textContent = s.update_note || '';
+
     if (first || document.activeElement !== $('link')) $('link').value = s.link;
     if (first && !s.link) $('link').focus();
     first = false;
   };
 
+  window.__log = function (t) {
+    const b = $('logbox');
+    b.textContent = t || 'Лог пуст: ядро ещё не запускалось или ничего не писало.';
+    b.scrollTop = b.scrollHeight;
+  };
+
   $('power').onclick = () => send({ cmd: 'toggle' });
   $('refresh').onclick = () => send({ cmd: 'refresh' });
-  $('server').onchange = (e) => send({ cmd: 'server', key: e.target.value });
-  ['bypass_ru', 'autostart', 'autoconnect'].forEach((k) =>
+  ['bypass_ru', 'autostart', 'autoconnect', 'auto_update', 'verbose'].forEach((k) =>
     $(k).onchange = (e) => send({ cmd: 'set', key: k, value: e.target.checked }));
   $('save').onclick = () => send({ cmd: 'save', link: $('link').value.trim() });
-  $('log').onclick = () => send({ cmd: 'log' });
-  document.addEventListener('contextmenu', (e) => { if (!/TEXTAREA|SELECT/.test(e.target.tagName)) e.preventDefault(); });
+  $('updbtn').onclick = () => send({ cmd: 'do_update' });
+  $('chk').onclick = () => send({ cmd: 'check_update' });
+  $('folder').onclick = () => send({ cmd: 'folder' });
+  $('logr').onclick = () => send({ cmd: 'log' });
+  $('logc').onclick = () => {
+    const text = $('logbox').textContent;
+    const done = () => { $('logc').textContent = 'Скопировано'; setTimeout(() => $('logc').textContent = 'Копировать', 1500); };
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, () => {});
+    else { const r = document.createRange(); r.selectNodeContents($('logbox')); const s = getSelection(); s.removeAllRanges(); s.addRange(r); document.execCommand('copy'); done(); }
+  };
+  $('log').onclick = () => {
+    const c = $('logcard');
+    const show = c.style.display !== 'block';
+    c.style.display = show ? 'block' : 'none';
+    $('log').textContent = show ? 'Скрыть лог' : 'Показать лог';
+    if (show) { send({ cmd: 'log' }); c.scrollIntoView({ behavior: 'smooth', block: 'end' }); }
+  };
+  document.addEventListener('contextmenu', (e) => { if (!/TEXTAREA|PRE/.test(e.target.tagName)) e.preventDefault(); });
   send({ cmd: 'ready' });
 </script>
 </html>

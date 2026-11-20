@@ -41,3 +41,7 @@ Filename: "{app}\nyxar.exe"; Description: "{cm:LaunchProgram,Nyxar}"; Flags: now
 
 [UninstallRun]
 Filename: "schtasks.exe"; Parameters: "/Delete /TN Nyxar /F"; Flags: runhidden; RunOnceId: "DeleteAutostartTask"
+
+[UninstallDelete]
+Type: files; Name: "{app}\nyxar.exe.old"
+Type: files; Name: "{app}\nyxar.exe.new"

@@ -1,6 +1,6 @@
 [package]
 name = "nyxar"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 
 [features]
@@ -9,6 +9,7 @@ embed = []
 
 [dependencies]
 flate2 = "1"
+sha2 = "0.10"
 tao = "0.30"
 wry = "0.47"
 tray-icon = "0.19"

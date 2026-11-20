@@ -15,6 +15,7 @@ use std::{
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
 };
+use std::sync::atomic::{AtomicUsize, Ordering};
 use url::Url;
 
 pub const APP: &str = "Nyxar";
@@ -46,6 +47,12 @@ pub struct Settings {
     pub bypass_ru: bool,
     #[serde(default)]
     pub autoconnect: bool,
+    /// Подробный лог sing-box (для диагностики, лог быстро растёт)
+    #[serde(default)]
+    pub verbose: bool,
+    /// Ставить обновления с GitHub автоматически (когда VPN не подключён)
+    #[serde(default = "d_true")]
+    pub auto_update: bool,
 }
 
 impl Default for Settings {
@@ -55,6 +62,8 @@ impl Default for Settings {
             server: d_auto(),
             bypass_ru: true,
             autoconnect: false,
+            verbose: false,
+            auto_update: true,
         }
     }
 }
@@ -170,13 +179,6 @@ impl Server {
     pub fn key(&self) -> String {
         format!("{}:{}", self.host, self.port)
     }
-
-    pub fn label(&self) -> String {
-        match self.ping {
-            Some(ms) => format!("{} — {} мс", self.name, ms),
-            None => format!("{} — нет ответа", self.name),
-        }
-    }
 }
 
 fn decode_maybe_b64(text: &str) -> String {
@@ -194,33 +196,97 @@ fn decode_maybe_b64(text: &str) -> String {
     text.to_string()
 }
 
-/// Принимает vless://, несколько ссылок или URL подписки.
-pub fn fetch_links(src: &str) -> Result<Vec<String>, String> {
-    let src = src.trim();
-    if src.is_empty() {
-        return Err("Ссылка не задана: открой «Настройки»".into());
-    }
-    let text = if src.starts_with("http://") || src.starts_with("https://") {
-        ureq::get(src)
-            .timeout(Duration::from_secs(15))
-            .set("User-Agent", "nyxar")
-            .call()
-            .map_err(|e| format!("Не удалось скачать подписку: {e}"))?
-            .into_string()
-            .map_err(|e| format!("Подписка не читается: {e}"))?
-    } else {
-        src.to_string()
-    };
-    let links: Vec<String> = decode_maybe_b64(&text)
+/// User-Agent популярных клиентов. Многие панели подписок отдают заглушку
+/// («приложение не поддерживается») тем, кого не знают, поэтому пробуем несколько.
+const USER_AGENTS: &[&str] = &[
+    "v2rayN/7.4.0",
+    "v2rayNG/1.9.40",
+    "Happ/2.0.0",
+    "Hiddify/2.5.7",
+    "nyxar",
+];
+
+/// Какой User-Agent сработал в прошлый раз (с него начинаем).
+static GOOD_UA: AtomicUsize = AtomicUsize::new(0);
+
+/// Ссылка-заглушка вместо настоящего сервера.
+pub fn is_stub(link: &str) -> bool {
+    let name = parse_server(link).map(|s| s.name.to_lowercase()).unwrap_or_default();
+    [
+        "не поддерж",
+        "not support",
+        "unsupported",
+        "update your app",
+        "обновите приложение",
+    ]
+    .iter()
+    .any(|k| name.contains(k))
+}
+
+fn extract_links(text: &str) -> Vec<String> {
+    decode_maybe_b64(text)
         .lines()
         .map(str::trim)
         .filter(|l| l.starts_with("vless://"))
         .map(String::from)
-        .collect();
-    if links.is_empty() {
-        Err("Не нашёл ни одной ссылки vless://".into())
-    } else {
-        Ok(links)
+        .collect()
+}
+
+fn download_subscription(url: &str, ua: &str) -> Result<String, ureq::Error> {
+    let body = ureq::get(url)
+        .timeout(Duration::from_secs(15))
+        .set("User-Agent", ua)
+        .call()?
+        .into_string()
+        .map_err(|e| ureq::Error::from(e))?;
+    Ok(body)
+}
+
+/// Принимает vless://, несколько ссылок или URL подписки.
+pub fn fetch_links(src: &str) -> Result<Vec<String>, String> {
+    let src = src.trim();
+    if src.is_empty() {
+        return Err("Ссылка не задана: вставь её в поле внизу окна".into());
+    }
+    if !(src.starts_with("http://") || src.starts_with("https://")) {
+        let links = extract_links(src);
+        return if links.is_empty() {
+            Err("Не нашёл ни одной ссылки vless://".into())
+        } else {
+            Ok(links)
+        };
+    }
+
+    let start = GOOD_UA.load(Ordering::Relaxed) % USER_AGENTS.len();
+    let mut stub: Option<String> = None;
+    let mut last_err = String::from("Не нашёл ни одной ссылки vless://");
+    for i in 0..USER_AGENTS.len() {
+        let idx = (start + i) % USER_AGENTS.len();
+        match download_subscription(src, USER_AGENTS[idx]) {
+            Ok(text) => {
+                let (stubs, real): (Vec<String>, Vec<String>) =
+                    extract_links(&text).into_iter().partition(|l| is_stub(l));
+                if !real.is_empty() {
+                    GOOD_UA.store(idx, Ordering::Relaxed);
+                    return Ok(real);
+                }
+                if let Some(s) = stubs.first().and_then(|l| parse_server(l)) {
+                    stub = Some(s.name);
+                }
+            }
+            Err(e @ ureq::Error::Transport(_)) => {
+                return Err(format!("Не удалось скачать подписку: {e}"));
+            }
+            Err(e) => last_err = format!("Подписка ответила ошибкой: {e}"),
+        }
+    }
+    match stub {
+        Some(name) => Err(format!(
+            "Подписка вернула заглушку «{name}» вместо серверов, хотя я пробовал разные приложения. \
+             Открой ссылку подписки в браузере и проверь, что там список серверов, \
+             или напиши в поддержку провайдера."
+        )),
+        None => Err(last_err),
     }
 }
 
@@ -375,7 +441,7 @@ pub fn vless_outbound(link: &str) -> Result<Value, String> {
     Ok(out)
 }
 
-pub fn build_config(outbound: Value, bypass_ru: bool) -> Value {
+pub fn build_config(outbound: Value, bypass_ru: bool, verbose: bool) -> Value {
     let mut dns_rules: Vec<Value> = vec![];
     let mut route_rules: Vec<Value> = vec![
         json!({ "action": "sniff" }),
@@ -392,7 +458,7 @@ pub fn build_config(outbound: Value, bypass_ru: bool) -> Value {
     }
 
     json!({
-        "log": { "level": "warn", "timestamp": true },
+        "log": { "level": if verbose { "info" } else { "warn" }, "timestamp": true },
         "dns": {
             "servers": [
                 { "tag": "remote", "type": "https", "server": "1.1.1.1", "detour": "proxy" },
@@ -437,7 +503,7 @@ fn hide_window(cmd: &mut Command) {
 }
 
 /// Запускает ядро. Возвращает процесс и название выбранного сервера.
-pub fn start_core(s: &Settings) -> Result<(Child, String), String> {
+pub fn start_core(s: &Settings) -> Result<(Child, String, String), String> {
     let core = core_path()?;
     let core_dir = core.parent().map(|p| p.to_path_buf()).unwrap_or_else(base_dir);
     let dir = data_dir();
@@ -451,7 +517,7 @@ pub fn start_core(s: &Settings) -> Result<(Child, String), String> {
         .ok_or("Нет доступных серверов")?
         .clone();
 
-    let cfg = build_config(vless_outbound(&srv.link)?, s.bypass_ru);
+    let cfg = build_config(vless_outbound(&srv.link)?, s.bypass_ru, s.verbose);
     let cfg_path = dir.join("config.json");
     fs::write(&cfg_path, serde_json::to_string_pretty(&cfg).unwrap_or_default())
         .map_err(|e| format!("Не записался config.json: {e}"))?;
@@ -474,7 +540,8 @@ pub fn start_core(s: &Settings) -> Result<(Child, String), String> {
     let child = cmd
         .spawn()
         .map_err(|e| format!("Не запустился sing-box: {e}"))?;
-    Ok((child, srv.name))
+    let key = srv.key();
+    Ok((child, srv.name, key))
 }
 
 fn strip_ansi(s: &str) -> String {
@@ -514,13 +581,25 @@ pub fn log_tail(max_chars: usize) -> String {
 /// Открывает папку с настройками и логом.
 pub fn open_data_dir() {
     let dir = data_dir();
-    let mut c = if cfg!(windows) {
-        Command::new("explorer")
-    } else {
-        Command::new("xdg-open")
-    };
-    c.arg(dir).stdout(Stdio::null()).stderr(Stdio::null());
-    let _ = c.spawn();
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // `start` поднимает окно проводника поверх остальных, чего не делает прямой запуск explorer
+        let _ = Command::new("cmd")
+            .raw_arg(format!("/C start \"\" \"{}\"", dir.display()))
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = Command::new("xdg-open")
+            .arg(dir)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+    }
 }
 
 #[cfg(windows)]
@@ -640,8 +719,8 @@ mod tests {
     #[test]
     fn config_bypass_toggle() {
         let o = vless_outbound(LINK).unwrap();
-        let on = build_config(o.clone(), true);
-        let off = build_config(o, false);
+        let on = build_config(o.clone(), true, false);
+        let off = build_config(o, false, false);
         assert_eq!(on["route"]["rules"].as_array().unwrap().len(), 4);
         assert_eq!(off["route"]["rules"].as_array().unwrap().len(), 3);
         assert!(on["dns"]["rules"].as_array().unwrap().len() == 1);
@@ -661,6 +740,27 @@ mod tests {
         assert_eq!(pick_server(&v, "auto").unwrap().host, "b");
         assert_eq!(pick_server(&v, "c:443").unwrap().host, "c");
         assert_eq!(pick_server(&v, "zzz:1").unwrap().host, "b");
+    }
+
+    #[test]
+    fn detects_stub_servers() {
+        let stub = "vless://0000@stub.example:443?security=tls#%D0%9F%D1%80%D0%B8%D0%BB%D0%BE%D0%B6%D0%B5%D0%BD%D0%B8%D0%B5%20%D0%BD%D0%B5%20%D0%BF%D0%BE%D0%B4%D0%B4%D0%B5%D1%80%D0%B6%D0%B8%D0%B2%D0%B0%D0%B5%D1%82%D1%81%D1%8F";
+        assert_eq!(parse_server(stub).unwrap().name, "Приложение не поддерживается");
+        assert!(is_stub(stub));
+        assert!(!is_stub(LINK));
+    }
+
+    #[test]
+    fn extracts_only_vless_links() {
+        let text = format!("vmess://abc\n{LINK}\n\ntrojan://x\n");
+        assert_eq!(extract_links(&text), vec![LINK.to_string()]);
+    }
+
+    #[test]
+    fn verbose_changes_log_level() {
+        let o = vless_outbound(LINK).unwrap();
+        assert_eq!(build_config(o.clone(), true, false)["log"]["level"], "warn");
+        assert_eq!(build_config(o, true, true)["log"]["level"], "info");
     }
 
     #[test]
