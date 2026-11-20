@@ -176,9 +176,46 @@ pub struct Server {
 }
 
 impl Server {
+    /// Уникальный ключ сервера. Раньше был host:port, но в подписках много записей
+    /// с одним адресом и портом (разные UUID/параметры), из-за чего выбирались сразу несколько.
+    /// Хэш ссылки без имени (#...): имя может меняться при каждом обновлении подписки.
     pub fn key(&self) -> String {
+        let base = self.link.split('#').next().unwrap_or("");
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325; // FNV-1a, стабилен между версиями
+        for b in base.trim().bytes() {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        format!("s{h:016x}")
+    }
+
+    fn legacy_key(&self) -> String {
         format!("{}:{}", self.host, self.port)
     }
+}
+
+/// Запись-пустышка: информация о трафике/сроке, закрытая заглушка, адрес-заглушка.
+/// Такие серверы отвечают на пинг мгновенно, выигрывают в «Авто», но трафика не дают.
+fn is_dummy(s: &Server) -> bool {
+    let name = s.name.to_lowercase();
+    let host = s.host.to_lowercase();
+    let bad_host = host == "localhost"
+        || host == "0.0.0.0"
+        || host == "::"
+        || host == "::1"
+        || host.starts_with("127.")
+        || host.starts_with("0.")
+        || host.starts_with("10.")
+        || host.starts_with("192.168.")
+        || host.starts_with("169.254.");
+    let bad_uuid = s.link.contains("00000000-0000-0000-0000-000000000000");
+    let info_name = [
+        "осталось", "истека", "истёк", "истек", "expire", "traffic left", "трафик закон",
+        "подписка закончилась",
+    ]
+    .iter()
+    .any(|k| name.contains(k));
+    s.port <= 1 || bad_host || bad_uuid || info_name
 }
 
 fn decode_maybe_b64(text: &str) -> String {
@@ -311,12 +348,24 @@ pub fn parse_server(link: &str) -> Option<Server> {
 }
 
 pub fn load_servers(src: &str) -> Result<Vec<Server>, String> {
-    let servers: Vec<Server> = fetch_links(src)?
-        .iter()
-        .filter_map(|l| parse_server(l))
-        .collect();
+    let mut seen = std::collections::HashSet::new();
+    let mut unsupported = 0usize;
+    let mut dummy = 0usize;
+    let mut servers: Vec<Server> = Vec::new();
+    for s in fetch_links(src)?.iter().filter_map(|l| parse_server(l)) {
+        if is_dummy(&s) {
+            dummy += 1;
+        } else if vless_outbound(&s.link).is_err() {
+            unsupported += 1;
+        } else if seen.insert(s.key()) {
+            servers.push(s);
+        }
+    }
     if servers.is_empty() {
-        Err("Не удалось разобрать ни одной ссылки".into())
+        Err(format!(
+            "Нет рабочих серверов: отброшено {dummy} служебных записей и {unsupported} \
+             с неподдерживаемым транспортом (xhttp, kcp и т.п.)"
+        ))
     } else {
         Ok(servers)
     }
@@ -346,6 +395,10 @@ pub fn pick_server<'a>(servers: &'a [Server], key: &str) -> Option<&'a Server> {
         if let Some(s) = servers.iter().find(|s| s.key() == key) {
             return Some(s);
         }
+        // старые настройки хранили host:port
+        if let Some(s) = servers.iter().find(|s| s.legacy_key() == key) {
+            return Some(s);
+        }
     }
     servers
         .iter()
@@ -372,6 +425,11 @@ pub fn vless_outbound(link: &str) -> Result<Value, String> {
 
     let q: HashMap<String, String> = u.query_pairs().into_owned().collect();
     let g = |k: &str| q.get(k).map(|s| s.as_str()).unwrap_or("");
+
+    let enc = g("encryption");
+    if !enc.is_empty() && enc != "none" {
+        return Err("Шифрование VLESS encryption не поддерживается ядром".into());
+    }
 
     let mut out = json!({
         "type": "vless",
@@ -416,17 +474,29 @@ pub fn vless_outbound(link: &str) -> Result<Value, String> {
             if !g("alpn").is_empty() {
                 tls["alpn"] = json!(g("alpn").split(',').collect::<Vec<_>>());
             }
+            if matches!(g("allowInsecure"), "1" | "true") || matches!(g("insecure"), "1" | "true") {
+                tls["insecure"] = json!(true);
+            }
             out["tls"] = tls;
         }
-        _ => {}
+        "" | "none" => {}
+        other => return Err(format!("Защита {other} не поддерживается")),
     }
 
+    let path = if g("path").is_empty() { "/" } else { g("path") };
     match g("type") {
+        "" | "tcp" => {
+            // tcp с заголовком http-обфускации
+            if g("headerType") == "http" {
+                let mut t = json!({ "type": "http", "method": "GET", "path": path });
+                if !g("host").is_empty() {
+                    t["host"] = json!(g("host").split(',').collect::<Vec<_>>());
+                }
+                out["transport"] = t;
+            }
+        }
         "ws" => {
-            let mut t = json!({
-                "type": "ws",
-                "path": if g("path").is_empty() { "/" } else { g("path") }
-            });
+            let mut t = json!({ "type": "ws", "path": path });
             if !g("host").is_empty() {
                 t["headers"] = json!({ "Host": g("host") });
             }
@@ -435,7 +505,22 @@ pub fn vless_outbound(link: &str) -> Result<Value, String> {
         "grpc" => {
             out["transport"] = json!({ "type": "grpc", "service_name": g("serviceName") });
         }
-        _ => {}
+        "httpupgrade" => {
+            let mut t = json!({ "type": "httpupgrade", "path": path });
+            if !g("host").is_empty() {
+                t["host"] = json!(g("host"));
+            }
+            out["transport"] = t;
+        }
+        "h2" | "http" => {
+            let mut t = json!({ "type": "http", "path": path });
+            if !g("host").is_empty() {
+                t["host"] = json!(g("host").split(',').collect::<Vec<_>>());
+            }
+            out["transport"] = t;
+        }
+        // раньше такие ссылки молча превращались в обычный tcp: подключение есть, трафика нет
+        other => return Err(format!("Транспорт {other} не поддерживается ядром")),
     }
 
     Ok(out)
@@ -696,7 +781,36 @@ mod tests {
     fn parses_server_name_and_key() {
         let s = parse_server(LINK).unwrap();
         assert_eq!(s.name, "Нидерланды");
-        assert_eq!(s.key(), "example.org:443");
+        assert_eq!(s.key(), parse_server(LINK).unwrap().key());
+        // имя не влияет на ключ
+        let renamed = LINK.split('#').next().unwrap().to_string() + "#other";
+        assert_eq!(parse_server(&renamed).unwrap().key(), s.key());
+    }
+
+    #[test]
+    fn same_host_port_gives_different_keys() {
+        let a = LINK.to_string();
+        let b = LINK.replace("3f2a1b4c", "aaaaaaaa");
+        let (sa, sb) = (parse_server(&a).unwrap(), parse_server(&b).unwrap());
+        assert_eq!((sa.host.clone(), sa.port), (sb.host.clone(), sb.port));
+        assert_ne!(sa.key(), sb.key());
+    }
+
+    #[test]
+    fn dummy_servers_are_dropped() {
+        let loopback = "vless://u@127.0.0.1:443?security=tls#x";
+        let info = "vless://u@example.org:443?security=tls#%D0%9E%D1%81%D1%82%D0%B0%D0%BB%D0%BE%D1%81%D1%8C%205%20%D0%B4%D0%BD%D0%B5%D0%B9";
+        assert!(is_dummy(&parse_server(loopback).unwrap()));
+        assert!(is_dummy(&parse_server(info).unwrap()));
+        assert!(!is_dummy(&parse_server(LINK).unwrap()));
+    }
+
+    #[test]
+    fn unsupported_transport_is_error() {
+        let l = LINK.replace("type=tcp", "type=xhttp");
+        assert!(vless_outbound(&l).is_err());
+        let l = LINK.replace("type=tcp", "type=httpupgrade&path=%2Fx");
+        assert_eq!(vless_outbound(&l).unwrap()["transport"]["type"], "httpupgrade");
     }
 
     #[test]
@@ -733,12 +847,13 @@ mod tests {
             name: h.into(),
             host: h.into(),
             port: 443,
-            link: String::new(),
+            link: format!("vless://u@{h}:443"),
             ping: p,
         };
         let v = vec![mk("a", Some(90)), mk("b", Some(30)), mk("c", None)];
         assert_eq!(pick_server(&v, "auto").unwrap().host, "b");
-        assert_eq!(pick_server(&v, "c:443").unwrap().host, "c");
+        assert_eq!(pick_server(&v, &v[2].key()).unwrap().host, "c");
+        assert_eq!(pick_server(&v, "c:443").unwrap().host, "c"); // старый формат
         assert_eq!(pick_server(&v, "zzz:1").unwrap().host, "b");
     }
 
