@@ -1,6 +1,6 @@
 [package]
 name = "nyxar"
-version = "0.8.2"
+version = "0.9.0"
 edition = "2021"
 
 [features]
@@ -19,6 +19,11 @@ url = "2.5"
 percent-encoding = "2.3"
 base64 = "0.22"
 ureq = "2.10"
+aes = "0.8"
+ctr = "0.9"
+getrandom = "0.2"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "0.26"
 
 [target.'cfg(windows)'.dependencies]
 notify-rust = { version = "4", default-features = false }

@@ -46,7 +46,7 @@
   .st-error #status { color: var(--warn); }
   #sub { color: var(--mute); margin-top: 2px; min-height: 20px; }
 
-  #err {
+  #err, #tgerr {
     display: none; margin: 14px 0 0; padding: 10px 12px; border-radius: 10px; font-size: 12px; text-align: left;
     background: rgba(251,146,60,.1); border: 1px solid rgba(251,146,60,.35); color: #fed7aa;
     white-space: pre-wrap; word-break: break-word; max-height: 140px; overflow: auto;
@@ -158,6 +158,20 @@
   </section>
 
   <section class="card">
+    <div class="hd"><h3>Telegram</h3></div>
+    <label class="t"><span>Обход блокировки Telegram<small>свой прокси без VPN, работает по WebSocket</small></span>
+      <span class="sw"><input type="checkbox" id="tg_proxy"><i></i></span></label>
+    <div id="tgbox" style="display:none">
+      <div class="row" style="display:flex;gap:8px;margin-top:10px">
+        <button class="primary" id="tgadd">Добавить в Telegram</button>
+        <button class="ghost" id="tgcopy">Копировать ссылку</button>
+      </div>
+      <p class="hint" style="margin:8px 0 0;font-size:12px;opacity:.7">Нажми один раз и подтверди в Telegram. Прокси 127.0.0.1:1443 работает, пока Nyxar запущен.</p>
+    </div>
+    <div id="tgerr"></div>
+  </section>
+
+  <section class="card">
     <div class="hd"><h3>Ссылка или подписка</h3></div>
     <textarea id="link" spellcheck="false" placeholder="vless://… или адрес подписки"></textarea>
     <button class="primary" id="save">Сохранить и подключить</button>
@@ -181,6 +195,7 @@
 
 <script>
   const $ = (id) => document.getElementById(id);
+  let tgLink = '';
   const send = (o) => window.ipc.postMessage(JSON.stringify(o));
   let first = true;
   let cur = 'auto';
@@ -228,7 +243,11 @@
     e.textContent = s.error;
     renderServers(s);
 
-    ['bypass_ru', 'autostart', 'autoconnect', 'auto_update', 'verbose'].forEach((k) => { $(k).checked = !!s[k]; });
+    ['bypass_ru', 'autostart', 'autoconnect', 'auto_update', 'verbose', 'tg_proxy'].forEach((k) => { $(k).checked = !!s[k]; });
+    tgLink = s.tg_link || '';
+    $('tgbox').style.display = s.tg_proxy ? 'block' : 'none';
+    $('tgerr').style.display = s.tg_error ? 'block' : 'none';
+    $('tgerr').textContent = s.tg_error || '';
     $('ver').textContent = 'v' + s.version;
 
     const u = $('upd');
@@ -254,7 +273,16 @@
 
   $('power').onclick = () => send({ cmd: 'toggle' });
   $('refresh').onclick = () => send({ cmd: 'refresh' });
-  ['bypass_ru', 'autostart', 'autoconnect', 'auto_update', 'verbose'].forEach((k) =>
+  $('tgadd').onclick = () => send({ cmd: 'tg_add' });
+  $('tgcopy').onclick = () => {
+    const done = () => { $('tgcopy').textContent = 'Скопировано'; setTimeout(() => { $('tgcopy').textContent = 'Копировать ссылку'; }, 1500); };
+    try { navigator.clipboard.writeText(tgLink).then(done, () => fallbackCopy(tgLink, done)); } catch (e) { fallbackCopy(tgLink, done); }
+  };
+  function fallbackCopy(t, done) {
+    const a = document.createElement('textarea'); a.value = t; document.body.appendChild(a); a.select();
+    try { document.execCommand('copy'); done(); } catch (e) {} a.remove();
+  }
+  ['bypass_ru', 'autostart', 'autoconnect', 'auto_update', 'verbose', 'tg_proxy'].forEach((k) =>
     $(k).onchange = (e) => send({ cmd: 'set', key: k, value: e.target.checked }));
   $('save').onclick = () => send({ cmd: 'save', link: $('link').value.trim() });
   $('updbtn').onclick = () => send({ cmd: 'do_update' });

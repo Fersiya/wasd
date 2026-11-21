@@ -1,6 +1,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod engine;
+mod tgproxy;
 mod update;
 
 use engine::{Server, Settings, APP};
@@ -87,6 +88,8 @@ struct App {
     update_busy: bool,
     update_failed: bool,
     update_note: String,
+    tg: Option<tgproxy::Proxy>,
+    tg_error: String,
 }
 
 impl App {
@@ -119,6 +122,9 @@ impl App {
             "autoconnect": self.settings.autoconnect,
             "auto_update": self.settings.auto_update,
             "verbose": self.settings.verbose,
+            "tg_proxy": self.tg.is_some(),
+            "tg_error": self.tg_error,
+            "tg_link": if self.tg.is_some() { tgproxy::link(&self.settings.tg_secret) } else { String::new() },
             "link": self.settings.link,
             "update": self.update.as_ref()
                 .map(|r| json!({ "version": r.version, "busy": self.update_busy })),
@@ -234,6 +240,34 @@ fn notify(title: &str, body: &str) {
     {
         let _ = (title, body);
     }
+}
+
+/// Включает или выключает Telegram-прокси согласно настройке.
+fn apply_tg(app: &mut App) {
+    app.tg = None; // Drop останавливает приём подключений
+    app.tg_error.clear();
+    if !app.settings.tg_proxy {
+        return;
+    }
+    if app.settings.tg_secret.len() != 32 {
+        app.settings.tg_secret = tgproxy::new_secret();
+        engine::save_settings(&app.settings);
+    }
+    // порт освобождается не мгновенно: пробуем несколько раз
+    let mut last = String::new();
+    for _ in 0..10 {
+        match tgproxy::Proxy::start(&app.settings.tg_secret) {
+            Ok(p) => {
+                app.tg = Some(p);
+                return;
+            }
+            Err(e) => last = e,
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
+    }
+    app.settings.tg_proxy = false;
+    engine::save_settings(&app.settings);
+    app.tg_error = last;
 }
 
 fn begin_connect(proxy: &EventLoopProxy<UserEvent>, app: &mut App) {
@@ -397,6 +431,8 @@ fn main() {
         update_busy: false,
         update_failed: false,
         update_note: String::new(),
+        tg: None,
+        tg_error: String::new(),
     };
     let mut win: Option<Win> = None;
     let mut next_poll = Instant::now() + Duration::from_secs(2);
@@ -437,6 +473,7 @@ fn main() {
                 if !minimized {
                     win = open_window(target, &proxy);
                 }
+                apply_tg(&mut app);
                 refresh_servers(&proxy, &mut app);
                 if app.settings.autoconnect && !app.settings.link.trim().is_empty() {
                     begin_connect(&proxy, &mut app);
@@ -505,6 +542,11 @@ fn main() {
                                     restart(&proxy, &mut app);
                                 }
                             }
+                            "tg_proxy" => {
+                                app.settings.tg_proxy = on;
+                                engine::save_settings(&app.settings);
+                                apply_tg(&mut app);
+                            }
                             "autoconnect" => {
                                 app.settings.autoconnect = on;
                                 engine::save_settings(&app.settings);
@@ -539,6 +581,14 @@ fn main() {
                     }
                     "log" => push_log(&win),
                     "folder" => engine::open_data_dir(),
+                    "tg_add" => {
+                        if app.tg.is_some() {
+                            let link = tgproxy::link(&app.settings.tg_secret);
+                            if !engine::open_url(&link) {
+                                app.tg_error = "Не удалось открыть Telegram. Скопируй ссылку кнопкой рядом.".into();
+                            }
+                        }
+                    }
                     "check_update" => {
                         app.update_note = "Проверяю обновления…".into();
                         spawn_update_check(&proxy, true);

@@ -53,6 +53,12 @@ pub struct Settings {
     /// Ставить обновления с GitHub автоматически (когда VPN не подключён)
     #[serde(default = "d_true")]
     pub auto_update: bool,
+    /// Локальный прокси для Telegram (обход блокировки через WebSocket)
+    #[serde(default)]
+    pub tg_proxy: bool,
+    /// Секрет прокси (hex, 16 байт), создаётся один раз
+    #[serde(default)]
+    pub tg_secret: String,
 }
 
 impl Default for Settings {
@@ -64,6 +70,8 @@ impl Default for Settings {
             autoconnect: false,
             verbose: false,
             auto_update: true,
+            tg_proxy: false,
+            tg_secret: String::new(),
         }
     }
 }
@@ -979,6 +987,19 @@ pub fn open_data_dir() {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn();
+    }
+}
+
+/// Открывает адрес (например tg://…) программой по умолчанию.
+pub fn open_url(url: &str) -> bool {
+    #[cfg(windows)]
+    {
+        shell::open(std::path::Path::new(url))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = url;
+        false
     }
 }
 
