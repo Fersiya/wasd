@@ -1,6 +1,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod engine;
+mod probe;
 mod tgproxy;
 mod update;
 
@@ -10,6 +11,10 @@ use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     process::Child,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 use tao::{
@@ -27,6 +32,8 @@ use wry::{WebContext, WebView, WebViewBuilder};
 /// Порт для проверки «уже запущено»: второй запуск просит первый показать окно.
 const SINGLE_PORT: u16 = 47631;
 /// Как часто проверять обновления.
+/// Как часто обновлять список серверов из подписки.
+const SUB_EVERY: Duration = Duration::from_secs(6 * 3600);
 const UPDATE_EVERY: Duration = Duration::from_secs(6 * 3600);
 
 enum UserEvent {
@@ -34,6 +41,10 @@ enum UserEvent {
     Tray(TrayIconEvent),
     Ui(String),
     Show,
+    /// Сколько байт отправлено и получено за подключение
+    Traffic(Option<(u64, u64)>),
+    /// Есть ли выход в интернет через туннель
+    Health(bool),
     /// (процесс ядра, имя сервера, ключ сервера)
     Started(Result<(Child, String, String), String>),
     Servers(Result<Vec<Server>, String>),
@@ -90,6 +101,17 @@ struct App {
     update_note: String,
     tg: Option<tgproxy::Proxy>,
     tg_error: String,
+    /// Сервер, выбранный автопереключением (не сохраняется в настройках)
+    override_key: Option<String>,
+    connected_at: Option<Instant>,
+    traffic: (u64, u64),
+    speed: (u64, u64),
+    last_traffic: Option<(u64, u64, Instant)>,
+    health_fails: u32,
+    stats_busy: Arc<AtomicBool>,
+    health_busy: Arc<AtomicBool>,
+    tick: u32,
+    pending_autoconnect: bool,
 }
 
 impl App {
@@ -122,6 +144,13 @@ impl App {
             "autoconnect": self.settings.autoconnect,
             "auto_update": self.settings.auto_update,
             "verbose": self.settings.verbose,
+            "auto_switch": self.settings.auto_switch,
+            "bypass_apps": self.settings.bypass_apps,
+            "up": self.traffic.0,
+            "down": self.traffic.1,
+            "up_speed": self.speed.0,
+            "down_speed": self.speed.1,
+            "uptime": self.connected_at.map(|t| t.elapsed().as_secs()).unwrap_or(0),
             "tg_proxy": self.tg.is_some(),
             "tg_error": self.tg_error,
             "tg_link": if self.tg.is_some() { tgproxy::link(&self.settings.tg_secret) } else { String::new() },
@@ -274,26 +303,66 @@ fn begin_connect(proxy: &EventLoopProxy<UserEvent>, app: &mut App) {
     app.st = St::Connecting;
     app.error.clear();
     let p = proxy.clone();
-    let s = app.settings.clone();
+    let mut s = app.settings.clone();
+    if let Some(k) = &app.override_key {
+        s.server = k.clone();
+    }
     std::thread::spawn(move || {
         let _ = p.send_event(UserEvent::Started(engine::start_core(&s)));
     });
 }
 
 /// Скачивает список серверов из подписки и меряет пинг.
+/// Пока VPN включён, пинг не меряем (через туннель он ложный) и оставляем прежний.
 fn refresh_servers(proxy: &EventLoopProxy<UserEvent>, app: &mut App) {
     let link = app.settings.link.clone();
     if link.trim().is_empty() {
         return;
     }
     app.refreshing = true;
+    let tunnel = app.child.is_some() || app.st == St::Connecting;
+    let old: Vec<(String, Option<u32>)> = app.servers.iter().map(|s| (s.key(), s.ping)).collect();
     let p = proxy.clone();
     std::thread::spawn(move || {
         let res = engine::load_servers(&link).map(|mut list| {
-            engine::ping_all(&mut list);
+            if tunnel {
+                for s in list.iter_mut() {
+                    s.ping = old.iter().find(|(k, _)| *k == s.key()).and_then(|(_, p)| *p);
+                }
+            } else {
+                engine::ping_all(&mut list);
+            }
             list
         });
         let _ = p.send_event(UserEvent::Servers(res));
+    });
+}
+
+/// Связь пропала: отключаемся, меряем серверы напрямую и подключаемся к лучшему живому.
+fn failover(proxy: &EventLoopProxy<UserEvent>, app: &mut App) {
+    engine::stop_core(&mut app.child);
+    app.st = St::Connecting;
+    app.health_fails = 0;
+    app.connected_at = None;
+    let p = proxy.clone();
+    let mut s = app.settings.clone();
+    let current = app.server_key.clone();
+    std::thread::spawn(move || {
+        let res = engine::load_servers(&s.link).and_then(|mut list| {
+            engine::ping_all(&mut list);
+            let best = list
+                .iter()
+                .filter(|x| x.ping.is_some() && x.key() != current)
+                .min_by_key(|x| x.ping)
+                .map(|x| x.key())
+                .unwrap_or(current);
+            s.server = best;
+            engine::start_core(&s)
+        });
+        if let Ok((_, name, _)) = &res {
+            notify(APP, &format!("Связь пропала, переключился на {name}"));
+        }
+        let _ = p.send_event(UserEvent::Started(res));
     });
 }
 
@@ -308,6 +377,8 @@ fn toggle_connection(proxy: &EventLoopProxy<UserEvent>, app: &mut App) {
     if app.child.is_some() {
         engine::stop_core(&mut app.child);
         app.st = St::Off;
+        app.override_key = None;
+        app.connected_at = None;
         app.error.clear();
         maybe_auto_update(proxy, app);
     } else if app.st != St::Connecting {
@@ -433,10 +504,21 @@ fn main() {
         update_note: String::new(),
         tg: None,
         tg_error: String::new(),
+        override_key: None,
+        connected_at: None,
+        traffic: (0, 0),
+        speed: (0, 0),
+        last_traffic: None,
+        health_fails: 0,
+        stats_busy: Arc::new(AtomicBool::new(false)),
+        health_busy: Arc::new(AtomicBool::new(false)),
+        tick: 0,
+        pending_autoconnect: false,
     };
     let mut win: Option<Win> = None;
     let mut next_poll = Instant::now() + Duration::from_secs(2);
     let mut next_update = Instant::now() + Duration::from_secs(8);
+    let mut next_sub = Instant::now() + SUB_EVERY;
 
     event_loop.run(move |event, target, control_flow| {
         let now = Instant::now();
@@ -459,6 +541,31 @@ fn main() {
                     sync(&app, &tray, &status_item, &toggle_item, &win);
                 }
             }
+            if app.st == St::On && app.child.is_some() {
+                app.tick = app.tick.wrapping_add(1);
+                if !app.stats_busy.swap(true, Ordering::Relaxed) {
+                    let (p, busy) = (proxy.clone(), app.stats_busy.clone());
+                    std::thread::spawn(move || {
+                        let _ = p.send_event(UserEvent::Traffic(engine::traffic()));
+                        busy.store(false, Ordering::Relaxed);
+                    });
+                }
+                // раз в ~10 секунд проверяем, что через туннель вообще есть интернет
+                if app.settings.auto_switch && app.tick % 5 == 0 && !app.health_busy.swap(true, Ordering::Relaxed) {
+                    let (p, busy) = (proxy.clone(), app.health_busy.clone());
+                    std::thread::spawn(move || {
+                        let _ = p.send_event(UserEvent::Health(engine::tunnel_alive()));
+                        busy.store(false, Ordering::Relaxed);
+                    });
+                }
+            }
+        }
+        // подписка: свежий список раз в 6 часов
+        if now >= next_sub {
+            next_sub = now + SUB_EVERY;
+            if app.st != St::Connecting {
+                refresh_servers(&proxy, &mut app);
+            }
         }
         // обновления: через 8 секунд после старта и затем раз в 6 часов
         if now >= next_update {
@@ -474,11 +581,40 @@ fn main() {
                     win = open_window(target, &proxy);
                 }
                 apply_tg(&mut app);
+                // сначала меряем серверы без туннеля, потом подключаемся
+                app.pending_autoconnect = app.settings.autoconnect && !app.settings.link.trim().is_empty();
                 refresh_servers(&proxy, &mut app);
-                if app.settings.autoconnect && !app.settings.link.trim().is_empty() {
-                    begin_connect(&proxy, &mut app);
-                }
                 sync(&app, &tray, &status_item, &toggle_item, &win);
+            }
+
+            Event::UserEvent(UserEvent::Traffic(t)) => {
+                if let (Some((up, down)), true) = (t, app.st == St::On) {
+                    let n = Instant::now();
+                    if let Some((u0, d0, t0)) = app.last_traffic {
+                        let dt = n.duration_since(t0).as_secs_f64().max(0.1);
+                        app.speed = (
+                            (up.saturating_sub(u0) as f64 / dt) as u64,
+                            (down.saturating_sub(d0) as f64 / dt) as u64,
+                        );
+                    }
+                    app.last_traffic = Some((up, down, n));
+                    app.traffic = (up, down);
+                    sync(&app, &tray, &status_item, &toggle_item, &win);
+                }
+            }
+
+            Event::UserEvent(UserEvent::Health(ok)) => {
+                if app.st == St::On {
+                    if ok {
+                        app.health_fails = 0;
+                    } else {
+                        app.health_fails += 1;
+                        if app.health_fails >= 3 && app.settings.link.trim() != "" {
+                            failover(&proxy, &mut app);
+                            sync(&app, &tray, &status_item, &toggle_item, &win);
+                        }
+                    }
+                }
             }
 
             Event::UserEvent(UserEvent::Show) => show_window(&mut win, target, &proxy),
@@ -520,6 +656,7 @@ fn main() {
                     "refresh" => refresh_servers(&proxy, &mut app),
                     "server" => {
                         app.settings.server = v["key"].as_str().unwrap_or("auto").to_string();
+                        app.override_key = None;
                         engine::save_settings(&app.settings);
                         if app.child.is_some() {
                             restart(&proxy, &mut app);
@@ -541,6 +678,10 @@ fn main() {
                                 if app.child.is_some() {
                                     restart(&proxy, &mut app);
                                 }
+                            }
+                            "auto_switch" => {
+                                app.settings.auto_switch = on;
+                                engine::save_settings(&app.settings);
                             }
                             "tg_proxy" => {
                                 app.settings.tg_proxy = on;
@@ -580,6 +721,18 @@ fn main() {
                         }
                     }
                     "log" => push_log(&win),
+                    "apps" => {
+                        let mut list: Vec<String> = v["list"]
+                            .as_array()
+                            .map(|a| a.iter().filter_map(|x| x.as_str()).map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+                            .unwrap_or_default();
+                        list.dedup();
+                        app.settings.bypass_apps = list;
+                        engine::save_settings(&app.settings);
+                        if app.child.is_some() {
+                            restart(&proxy, &mut app);
+                        }
+                    }
                     "folder" => engine::open_data_dir(),
                     "tg_add" => {
                         if app.tg.is_some() {
@@ -612,6 +765,12 @@ fn main() {
                         }
                     }
                 }
+                if app.pending_autoconnect {
+                    app.pending_autoconnect = false;
+                    if app.child.is_none() && app.st != St::Connecting {
+                        begin_connect(&proxy, &mut app);
+                    }
+                }
                 sync(&app, &tray, &status_item, &toggle_item, &win);
             }
 
@@ -621,9 +780,17 @@ fn main() {
                         engine::stop_core(&mut app.child); // на случай гонки двух подключений
                         app.child = Some(c);
                         app.server_name = name.clone();
+                        if app.settings.server != "auto" && app.settings.server != key {
+                            app.override_key = Some(key.clone()); // сервер выбран автопереключением
+                        }
                         app.server_key = key;
                         app.st = St::On;
                         app.error.clear();
+                        app.connected_at = Some(Instant::now());
+                        app.traffic = (0, 0);
+                        app.speed = (0, 0);
+                        app.last_traffic = None;
+                        app.health_fails = 0;
                         notify(APP, &format!("Подключено: {name}"));
                     }
                     Err(m) => {

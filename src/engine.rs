@@ -53,6 +53,12 @@ pub struct Settings {
     /// Ставить обновления с GitHub автоматически (когда VPN не подключён)
     #[serde(default = "d_true")]
     pub auto_update: bool,
+    /// Сам переключаться на другой сервер, если связь пропала
+    #[serde(default = "d_true")]
+    pub auto_switch: bool,
+    /// Программы (имена процессов, например game.exe), которые идут мимо VPN
+    #[serde(default)]
+    pub bypass_apps: Vec<String>,
     /// Локальный прокси для Telegram (обход блокировки через WebSocket)
     #[serde(default)]
     pub tg_proxy: bool,
@@ -70,6 +76,8 @@ impl Default for Settings {
             autoconnect: false,
             verbose: false,
             auto_update: true,
+            auto_switch: true,
+            bypass_apps: Vec::new(),
             tg_proxy: false,
             tg_secret: String::new(),
         }
@@ -118,7 +126,6 @@ const CORE_FILES: &[(&str, &[u8])] = &[
 ];
 
 /// Завершает sing-box.exe / xray.exe, запущенные из папки ядра Nyxar (остались от прошлого запуска).
-#[cfg(feature = "embed")]
 fn kill_stale_core(dir: &std::path::Path) {
     #[cfg(windows)]
     {
@@ -416,19 +423,13 @@ pub fn load_servers(src: &str) -> Result<Vec<Server>, String> {
     }
 }
 
-fn tcp_ping(host: &str, port: u16) -> Option<u32> {
-    let addr = (host, port).to_socket_addrs().ok()?.next()?;
-    let t = Instant::now();
-    TcpStream::connect_timeout(&addr, Duration::from_secs(2)).ok()?;
-    Some(t.elapsed().as_millis() as u32)
-}
-
-/// Пингует все серверы параллельно (время TCP-подключения).
+/// Пингует все серверы параллельно (TLS-рукопожатие, где возможно, иначе TCP).
+/// Выполнять только при выключенном VPN: через туннель замер получается ложным.
 pub fn ping_all(servers: &mut [Server]) {
     std::thread::scope(|sc| {
         for s in servers.iter_mut() {
             sc.spawn(move || {
-                s.ping = tcp_ping(&s.host, s.port);
+                s.ping = crate::probe::ping(&s.host, s.port, &s.link);
             });
         }
     });
@@ -846,6 +847,49 @@ fn start_xray(core_dir: &std::path::Path, cfg: &Value, port: u16) -> Result<(), 
     Ok(())
 }
 
+static API_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+
+/// Добавляет в конфиг программы мимо VPN и локальный API статистики.
+pub fn apply_extras(cfg: &mut Value, apps: &[String], api_port: u16) {
+    let names: Vec<String> = apps
+        .iter()
+        .map(|a| a.trim().trim_matches('"').to_string())
+        .filter(|a| !a.is_empty())
+        .collect();
+    if !names.is_empty() {
+        if let Some(rules) = cfg["route"]["rules"].as_array_mut() {
+            rules.insert(1, json!({ "process_name": names, "action": "route", "outbound": "direct" }));
+        }
+    }
+    if api_port != 0 {
+        cfg["experimental"] = json!({ "clash_api": { "external_controller": format!("127.0.0.1:{api_port}") } });
+    }
+}
+
+/// Сколько байт отправлено и получено за текущее подключение.
+pub fn traffic() -> Option<(u64, u64)> {
+    let port = API_PORT.load(Ordering::Relaxed);
+    if port == 0 {
+        return None;
+    }
+    let agent = ureq::AgentBuilder::new().timeout(Duration::from_millis(1500)).build();
+    let body = agent.get(&format!("http://127.0.0.1:{port}/connections")).call().ok()?.into_string().ok()?;
+    let v: Value = serde_json::from_str(&body).ok()?;
+    Some((v["uploadTotal"].as_u64()?, v["downloadTotal"].as_u64()?))
+}
+
+/// Проверка, что через туннель есть выход в интернет.
+pub fn tunnel_alive() -> bool {
+    for addr in ["1.1.1.1:443", "8.8.8.8:443"] {
+        if let Ok(a) = addr.parse() {
+            if TcpStream::connect_timeout(&a, Duration::from_secs(4)).is_ok() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 pub fn build_config(outbound: Value, bypass_ru: bool, verbose: bool) -> Value {
     let mut dns_rules: Vec<Value> = vec![];
     let mut route_rules: Vec<Value> = vec![
@@ -913,6 +957,10 @@ pub fn start_core(s: &Settings) -> Result<(Child, String, String), String> {
     let core_dir = core.parent().map(|p| p.to_path_buf()).unwrap_or_else(base_dir);
     let dir = data_dir();
 
+    // забытое ядро от прошлого запуска держит адаптер и порты: гасим один раз за запуск
+    static CLEANED: std::sync::Once = std::sync::Once::new();
+    CLEANED.call_once(|| kill_stale_core(&core_dir));
+
     let mut servers = load_servers(&s.link)?;
     let known = s.server != "auto" && servers.iter().any(|x| x.key() == s.server);
     if !known {
@@ -939,6 +987,10 @@ pub fn start_core(s: &Settings) -> Result<(Child, String, String), String> {
     } else {
         build_config(vless_outbound(&srv.link)?, s.bypass_ru, s.verbose)
     };
+    let mut cfg = cfg;
+    let api = free_port().unwrap_or(0);
+    API_PORT.store(api, Ordering::Relaxed);
+    apply_extras(&mut cfg, &s.bypass_apps, api);
     let cfg_path = dir.join("config.json");
     fs::write(&cfg_path, serde_json::to_string_pretty(&cfg).unwrap_or_default())
         .map_err(|e| format!("Не записался config.json: {e}"))?;
@@ -1263,6 +1315,25 @@ mod tests {
         assert_eq!(off["route"]["rules"].as_array().unwrap().len(), 3);
         assert!(on["dns"]["rules"].as_array().unwrap().len() == 1);
         assert!(off["dns"]["rules"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn extras_add_app_rule_and_api() {
+        let mut cfg = build_config(json!({"type":"direct","tag":"proxy"}), true, false);
+        apply_extras(&mut cfg, &["game.exe".into(), "  ".into(), "\"Steam.exe\"".into()], 9090);
+        let rules = cfg["route"]["rules"].as_array().unwrap();
+        assert_eq!(rules[0]["action"], "sniff");
+        assert_eq!(rules[1]["process_name"], json!(["game.exe", "Steam.exe"]));
+        assert_eq!(rules[1]["outbound"], "direct");
+        assert_eq!(cfg["experimental"]["clash_api"]["external_controller"], "127.0.0.1:9090");
+    }
+
+    #[test]
+    fn extras_empty_changes_nothing() {
+        let base = build_config(json!({"type":"direct","tag":"proxy"}), true, false);
+        let mut cfg = base.clone();
+        apply_extras(&mut cfg, &[], 0);
+        assert_eq!(cfg, base);
     }
 
     #[test]

@@ -5,43 +5,77 @@
 <title>Nyxar</title>
 <style>
   :root {
-    --bg: #0e1016; --card: #161924; --line: #252a39; --text: #e9ebf2; --mute: #8e96aa;
+    --bg: #0e1016; --card: #161924; --card2: #1b1f2d; --line: #252a39; --text: #e9ebf2; --mute: #8e96aa;
     --a1: #6d5bff; --a2: #22d3ee; --ok: #22c55e; --warn: #fb923c; --off: #5b6476;
+    --ease: cubic-bezier(.22, 1, .36, 1);
   }
-  * { box-sizing: border-box; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   html { color-scheme: dark; }
   body {
     margin: 0; background: var(--bg); color: var(--text); overflow-x: hidden;
     font: 14px/1.45 "Segoe UI", system-ui, sans-serif; user-select: none; -webkit-user-select: none;
   }
-  main { padding: 18px 20px 14px; max-width: 640px; margin: 0 auto; }
-  header { display: flex; align-items: center; gap: 10px; }
-  header svg { width: 34px; height: 34px; }
+  /* мягкое свечение за кнопкой, меняет цвет вместе с состоянием */
+  body::before {
+    content: ""; position: fixed; left: 50%; top: -120px; width: 520px; height: 420px; transform: translateX(-50%);
+    background: radial-gradient(closest-side, var(--glow, rgba(109,91,255,.16)), transparent); pointer-events: none;
+    transition: background .6s; z-index: 0;
+  }
+  body.st-on { --glow: rgba(34,197,94,.17); }
+  body.st-error { --glow: rgba(251,146,60,.17); }
+  body.st-off { --glow: rgba(109,91,255,.12); }
+
+  main { position: relative; z-index: 1; padding: 16px 20px 96px; max-width: 560px; margin: 0 auto; }
+  header { display: flex; align-items: center; gap: 10px; animation: fadeIn .5s var(--ease) both; }
+  header svg { width: 32px; height: 32px; }
   header b { font-size: 18px; letter-spacing: .2px; }
   header span { margin-left: auto; color: var(--mute); font-size: 12px; }
 
+  /* ───── страницы ───── */
+  .page { display: none; }
+  .page.on { display: block; animation: pageIn .38s var(--ease) both; }
+  @keyframes pageIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+  @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes fadeUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
   .banner {
     display: none; align-items: center; gap: 10px; margin-top: 12px; padding: 9px 12px; border-radius: 12px;
-    background: rgba(34,211,238,.1); border: 1px solid rgba(34,211,238,.35); color: #a5f3fc;
+    background: rgba(34,211,238,.1); border: 1px solid rgba(34,211,238,.35); color: #a5f3fc; animation: fadeUp .4s var(--ease) both;
   }
   .banner span { flex: 1; }
 
-  .hero { text-align: center; padding: 18px 0 6px; }
+  /* ───── главная ───── */
+  .hero { text-align: center; padding: 22px 0 4px; }
+  .btnwrap { position: relative; width: 150px; height: 150px; margin: 0 auto; display: grid; place-items: center; }
+  .ring { position: absolute; inset: 9px; border-radius: 50%; border: 2px solid transparent; opacity: 0; pointer-events: none; }
+  .st-on .ring { border-color: rgba(34,197,94,.55); animation: ripple 3s ease-out infinite; }
+  .st-on .ring:nth-child(2) { animation-delay: 1s; }
+  .st-on .ring:nth-child(3) { animation-delay: 2s; }
+  @keyframes ripple { 0% { transform: scale(.9); opacity: .7; } 100% { transform: scale(1.5); opacity: 0; } }
+  .spinner {
+    position: absolute; inset: 2px; border-radius: 50%; opacity: 0; pointer-events: none; transition: opacity .3s;
+    background: conic-gradient(from 0deg, transparent 0 70%, var(--a2) 100%);
+    -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 2px));
+    mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 2px));
+  }
+  .st-connecting .spinner { opacity: 1; animation: rot 1s linear infinite; }
+
   #power {
-    width: 132px; height: 132px; border-radius: 50%; border: 0; cursor: pointer; color: #fff;
+    position: relative; width: 132px; height: 132px; border-radius: 50%; border: 0; cursor: pointer; color: #fff;
     background: var(--off); display: inline-flex; align-items: center; justify-content: center;
     box-shadow: 0 0 0 8px rgba(255,255,255,.04), 0 10px 30px rgba(0,0,0,.45);
-    transition: background .25s, box-shadow .25s, transform .1s;
+    transition: background .4s, box-shadow .4s, transform .15s var(--ease);
   }
-  #power:hover { transform: scale(1.03); }
-  #power:active { transform: scale(.97); }
-  #power svg { width: 56px; height: 56px; fill: none; stroke: currentColor; stroke-width: 2.1; stroke-linecap: round; stroke-linejoin: round; }
+  #power:hover { transform: scale(1.04); }
+  #power:active { transform: scale(.95); }
+  #power svg { width: 56px; height: 56px; fill: none; stroke: currentColor; stroke-width: 2.1; stroke-linecap: round; stroke-linejoin: round; transition: transform .4s var(--ease); }
+  .st-on #power svg { transform: rotate(180deg); }
   .st-on #power { background: linear-gradient(135deg, #22c55e, #0ea5a4); box-shadow: 0 0 0 8px rgba(34,197,94,.14), 0 10px 34px rgba(34,197,94,.3); }
   .st-error #power { background: linear-gradient(135deg, #fb923c, #ef4444); box-shadow: 0 0 0 8px rgba(251,146,60,.14), 0 10px 34px rgba(239,68,68,.25); }
   .st-connecting #power { background: linear-gradient(135deg, var(--a1), var(--a2)); animation: pulse 1.2s ease-in-out infinite; }
   @keyframes pulse { 50% { box-shadow: 0 0 0 16px rgba(109,91,255,.12), 0 10px 30px rgba(0,0,0,.45); } }
 
-  #status { margin-top: 18px; font-size: 20px; font-weight: 600; }
+  #status { margin-top: 14px; font-size: 21px; font-weight: 600; transition: color .3s; }
   .st-on #status { color: var(--ok); }
   .st-error #status { color: var(--warn); }
   #sub { color: var(--mute); margin-top: 2px; min-height: 20px; }
@@ -50,55 +84,84 @@
     display: none; margin: 14px 0 0; padding: 10px 12px; border-radius: 10px; font-size: 12px; text-align: left;
     background: rgba(251,146,60,.1); border: 1px solid rgba(251,146,60,.35); color: #fed7aa;
     white-space: pre-wrap; word-break: break-word; max-height: 140px; overflow: auto;
-    user-select: text; -webkit-user-select: text; font-family: Consolas, monospace;
+    user-select: text; -webkit-user-select: text; font-family: Consolas, monospace; animation: fadeUp .35s var(--ease) both;
   }
 
-  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; margin-top: 14px; }
+  .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 20px; }
+  .tile { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 11px 14px; animation: fadeUp .45s var(--ease) both; }
+  .tile:nth-child(2) { animation-delay: .05s; } .tile:nth-child(3) { animation-delay: .1s; } .tile:nth-child(4) { animation-delay: .15s; }
+  .tile small { display: block; color: var(--mute); font-size: 11.5px; text-transform: uppercase; letter-spacing: .5px; }
+  .tile b { display: block; font-size: 19px; font-weight: 600; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .tile i { font-style: normal; color: var(--mute); font-size: 12px; font-weight: 400; }
+  .tile.dim b { color: #5d6579; }
+
+  .quick { display: flex; align-items: center; gap: 12px; margin-top: 12px; width: 100%; text-align: left; color: var(--text); font: inherit; cursor: pointer;
+    background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; transition: border-color .2s, transform .15s var(--ease); animation: fadeUp .5s var(--ease) .2s both; }
+  .quick:hover { border-color: var(--a1); transform: translateY(-1px); }
+  .quick span { flex: 1; min-width: 0; } .quick small { display: block; color: var(--mute); font-size: 12px; }
+  .quick em { font-style: normal; color: var(--mute); font-size: 18px; }
+
+  /* ───── общие элементы ───── */
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; margin-top: 14px; animation: fadeUp .45s var(--ease) both; }
   .hd { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; gap: 8px; }
   .hd h3 { margin: 0; font-size: 12px; font-weight: 600; color: var(--mute); text-transform: uppercase; letter-spacing: .6px; }
   .hd h3 em { font-style: normal; color: var(--a2); margin-left: 4px; }
-  textarea {
+  h2 { margin: 18px 0 0; font-size: 20px; font-weight: 600; }
+  textarea, input.txt {
     width: 100%; background: #0f121a; color: var(--text); border: 1px solid var(--line); border-radius: 9px;
-    padding: 9px 10px; font: inherit; outline: none; user-select: text; -webkit-user-select: text;
+    padding: 9px 10px; font: inherit; outline: none; user-select: text; -webkit-user-select: text; transition: border-color .2s;
   }
-  textarea:focus { border-color: var(--a1); }
+  textarea:focus, input.txt:focus { border-color: var(--a1); }
   textarea { height: 86px; resize: vertical; font: 12px Consolas, monospace; }
   button.ghost {
     background: #0f121a; color: var(--text); border: 1px solid var(--line); border-radius: 9px;
-    padding: 4px 11px; cursor: pointer; font: inherit; font-size: 13px;
+    padding: 5px 12px; cursor: pointer; font: inherit; font-size: 13px; transition: border-color .2s, transform .12s;
   }
   button.ghost:hover:not(:disabled) { border-color: var(--a1); }
+  button.ghost:active:not(:disabled) { transform: scale(.96); }
   button.ghost:disabled { opacity: .55; cursor: default; }
   button.primary {
     margin-top: 10px; width: 100%; padding: 10px; border: 0; border-radius: 10px; cursor: pointer; color: #fff;
-    font: inherit; font-weight: 600; background: linear-gradient(135deg, var(--a1), var(--a2));
+    font: inherit; font-weight: 600; background: linear-gradient(135deg, var(--a1), var(--a2)); transition: filter .2s, transform .12s;
   }
-  button.primary:hover { filter: brightness(1.08); }
+  button.primary:hover { filter: brightness(1.1); }
+  button.primary:active { transform: scale(.98); }
   .spin { display: inline-block; animation: rot .8s linear infinite; }
   @keyframes rot { to { transform: rotate(360deg); } }
 
-  #srvlist { display: flex; flex-direction: column; gap: 4px; max-height: 250px; overflow-y: auto; }
-  .srv { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 10px; cursor: pointer; border: 1px solid transparent; }
+  #srvlist { display: flex; flex-direction: column; gap: 4px; }
+  .srv { display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 10px; cursor: pointer; border: 1px solid transparent;
+    animation: fadeUp .4s var(--ease) both; animation-delay: calc(var(--i, 0) * 18ms); transition: background .2s, border-color .2s; }
   .srv:hover { background: #1c2030; }
   .srv.sel { background: rgba(109,91,255,.12); border-color: rgba(109,91,255,.5); }
-  .srv .dot { flex: none; width: 14px; height: 14px; border-radius: 50%; border: 2px solid #4a5268; }
+  .srv .dot { flex: none; width: 14px; height: 14px; border-radius: 50%; border: 2px solid #4a5268; transition: border-color .2s, background .2s; }
   .srv.sel .dot { border-color: var(--a1); background: radial-gradient(var(--a1) 0 42%, transparent 48%); }
   .srv .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .srv .nm small { display: block; color: var(--mute); font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
   .srv.live .nm { color: var(--ok); }
-  .ms { flex: none; font-size: 12px; padding: 2px 9px; border-radius: 20px; background: #0f121a; color: var(--mute); }
+  .srv.dead .nm { color: #6b7388; }
+  .tag { font-size: 10.5px; padding: 1px 7px; border-radius: 20px; margin-left: 6px; background: rgba(34,197,94,.15); color: #4ade80; vertical-align: 1px; }
+  .ms { flex: none; font-size: 12px; padding: 2px 9px; border-radius: 20px; background: #0f121a; color: var(--mute); font-variant-numeric: tabular-nums; }
   .ms.good { color: #4ade80; } .ms.mid { color: #fbbf24; } .ms.bad { color: #f87171; }
   .empty { color: var(--mute); font-size: 13px; padding: 6px 2px; }
 
-  label.t { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 0; cursor: pointer; }
+  label.t { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 0; cursor: pointer; }
   label.t + label.t { border-top: 1px solid var(--line); }
   label.t small { display: block; color: var(--mute); font-size: 12px; }
   .sw { position: relative; flex: none; width: 40px; height: 22px; }
   .sw input { opacity: 0; width: 0; height: 0; position: absolute; }
-  .sw i { position: absolute; inset: 0; border-radius: 22px; background: #2a3040; transition: background .2s; }
-  .sw i::after { content: ""; position: absolute; width: 16px; height: 16px; left: 3px; top: 3px; border-radius: 50%; background: #fff; transition: transform .2s; }
+  .sw i { position: absolute; inset: 0; border-radius: 22px; background: #2a3040; transition: background .25s; }
+  .sw i::after { content: ""; position: absolute; width: 16px; height: 16px; left: 3px; top: 3px; border-radius: 50%; background: #fff; transition: transform .25s var(--ease); }
   .sw input:checked + i { background: linear-gradient(135deg, var(--a1), var(--a2)); }
   .sw input:checked + i::after { transform: translateX(18px); }
+
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 10px; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 6px 4px 11px; border-radius: 20px; background: #0f121a; border: 1px solid var(--line); font-size: 13px; animation: fadeUp .3s var(--ease) both; }
+  .chip button { border: 0; background: transparent; color: var(--mute); cursor: pointer; width: 20px; height: 20px; border-radius: 50%; font-size: 15px; line-height: 1; }
+  .chip button:hover { background: #2a3040; color: #fff; }
+  .addrow { display: flex; gap: 8px; } .addrow input { flex: 1; } .addrow button { margin: 0; width: auto; padding: 0 16px; }
+  .hint { color: var(--mute); font-size: 12px; margin: 8px 0 0; }
+  .btnrow { display: flex; gap: 8px; margin-top: 10px; } .btnrow .primary { margin: 0; flex: 1; }
 
   #logcard { display: none; }
   #logbox {
@@ -106,14 +169,26 @@
     padding: 8px 10px; font: 11.5px/1.5 Consolas, monospace; color: #cbd2e1; white-space: pre-wrap; word-break: break-all;
     user-select: text; -webkit-user-select: text;
   }
+  .links { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 8px; font-size: 13px; }
+  .links a { color: var(--a2); cursor: pointer; } .links a:hover { text-decoration: underline; }
+  #note { color: var(--mute); font-size: 12px; margin-top: 6px; }
 
-  footer { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center; margin-top: 14px; color: var(--mute); font-size: 12px; }
-  footer a { color: var(--a2); cursor: pointer; }
-  footer a:hover { text-decoration: underline; }
-  #note { flex-basis: 100%; }
+  /* ───── нижняя навигация ───── */
+  nav { position: fixed; left: 0; right: 0; bottom: 0; z-index: 5; padding: 8px 20px 12px; background: linear-gradient(transparent, var(--bg) 38%); }
+  .tabs { position: relative; max-width: 520px; margin: 0 auto; display: grid; grid-template-columns: repeat(3, 1fr); background: rgba(22,25,36,.92);
+    border: 1px solid var(--line); border-radius: 16px; padding: 4px; backdrop-filter: blur(10px); box-shadow: 0 8px 30px rgba(0,0,0,.4); }
+  .tabs i { position: absolute; top: 4px; bottom: 4px; left: 4px; width: calc((100% - 8px) / 3); border-radius: 12px;
+    background: linear-gradient(135deg, rgba(109,91,255,.3), rgba(34,211,238,.2)); border: 1px solid rgba(109,91,255,.4);
+    transition: transform .4s var(--ease); transform: translateX(calc(var(--idx, 0) * 100%)); }
+  .tab { position: relative; z-index: 1; border: 0; background: transparent; color: var(--mute); font: inherit; font-size: 12px; padding: 7px 0 6px; cursor: pointer;
+    display: flex; flex-direction: column; align-items: center; gap: 2px; transition: color .25s; }
+  .tab svg { width: 21px; height: 21px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; transition: transform .3s var(--ease); }
+  .tab.on { color: var(--text); } .tab.on svg { transform: translateY(-1px) scale(1.08); }
+
+  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .001s !important; animation-iteration-count: 1 !important; transition-duration: .001s !important; } }
 </style>
 
-<main id="app">
+<main>
   <header>
     <svg viewBox="0 0 64 64" aria-hidden="true">
       <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#6d5bff"/><stop offset="1" stop-color="#22d3ee"/></linearGradient></defs>
@@ -126,86 +201,160 @@
 
   <div class="banner" id="upd"><span id="updtxt"></span><button class="ghost" id="updbtn">Обновить</button></div>
 
-  <section class="hero">
-    <button id="power" aria-label="Подключить или отключить">
-      <svg viewBox="0 0 24 24"><path d="M12 3v8.5"/><path d="M7 6.2a8 8 0 1 0 10 0"/></svg>
-    </button>
-    <div id="status">Отключено</div>
-    <div id="sub"></div>
-    <div id="err"></div>
-  </section>
-
-  <section class="card">
-    <div class="hd">
-      <h3>Серверы<em id="cnt"></em></h3>
-      <button class="ghost" id="refresh" title="Обновить список и пинг" aria-label="Обновить список и пинг">↻</button>
-    </div>
-    <div id="srvlist"></div>
-  </section>
-
-  <section class="card">
-    <div class="hd"><h3>Параметры</h3></div>
-    <label class="t"><span>Россия напрямую<small>.ru, .su, .рф и местные сервисы мимо VPN</small></span>
-      <span class="sw"><input type="checkbox" id="bypass_ru"><i></i></span></label>
-    <label class="t"><span>Запускать с Windows<small>сворачивается в трей</small></span>
-      <span class="sw"><input type="checkbox" id="autostart"><i></i></span></label>
-    <label class="t"><span>Подключаться при запуске</span>
-      <span class="sw"><input type="checkbox" id="autoconnect"><i></i></span></label>
-    <label class="t"><span>Обновлять автоматически<small>с GitHub, когда VPN не подключён</small></span>
-      <span class="sw"><input type="checkbox" id="auto_update"><i></i></span></label>
-    <label class="t"><span>Подробный лог<small>для диагностики, файл быстро растёт</small></span>
-      <span class="sw"><input type="checkbox" id="verbose"><i></i></span></label>
-  </section>
-
-  <section class="card">
-    <div class="hd"><h3>Telegram</h3></div>
-    <label class="t"><span>Обход блокировки Telegram<small>свой прокси без VPN, работает по WebSocket</small></span>
-      <span class="sw"><input type="checkbox" id="tg_proxy"><i></i></span></label>
-    <div id="tgbox" style="display:none">
-      <div class="row" style="display:flex;gap:8px;margin-top:10px">
-        <button class="primary" id="tgadd">Добавить в Telegram</button>
-        <button class="ghost" id="tgcopy">Копировать ссылку</button>
+  <!-- ГЛАВНАЯ -->
+  <section class="page on" id="p-home">
+    <div class="hero">
+      <div class="btnwrap">
+        <span class="ring"></span><span class="ring"></span><span class="ring"></span><span class="spinner"></span>
+        <button id="power" aria-label="Подключить или отключить">
+          <svg viewBox="0 0 24 24"><path d="M12 3v8.5"/><path d="M7 6.2a8 8 0 1 0 10 0"/></svg>
+        </button>
       </div>
-      <p class="hint" style="margin:8px 0 0;font-size:12px;opacity:.7">Нажми один раз и подтверди в Telegram. Прокси 127.0.0.1:1443 работает, пока Nyxar запущен.</p>
+      <div id="status">Отключено</div>
+      <div id="sub"></div>
+      <div id="err"></div>
     </div>
-    <div id="tgerr"></div>
-  </section>
 
-  <section class="card">
-    <div class="hd"><h3>Ссылка или подписка</h3></div>
-    <textarea id="link" spellcheck="false" placeholder="vless://… или адрес подписки"></textarea>
-    <button class="primary" id="save">Сохранить и подключить</button>
-  </section>
-
-  <section class="card" id="logcard">
-    <div class="hd">
-      <h3>Лог ядра</h3>
-      <span><button class="ghost" id="logr">Обновить</button> <button class="ghost" id="logc">Копировать</button></span>
+    <div class="stats" id="stats">
+      <div class="tile dim" id="t-down"><small>Скачивание</small><b id="v-down">—</b></div>
+      <div class="tile dim" id="t-up"><small>Отправка</small><b id="v-up">—</b></div>
+      <div class="tile dim" id="t-total"><small>Всего за сеанс</small><b id="v-total">—</b></div>
+      <div class="tile dim" id="t-time"><small>В сети</small><b id="v-time">—</b></div>
     </div>
-    <pre id="logbox"></pre>
+
+    <button class="quick" id="gosrv">
+      <span><b id="q-name">Сервер</b><small id="q-sub"></small></span><em>›</em>
+    </button>
   </section>
 
-  <footer>
-    <a id="log">Показать лог</a>
-    <a id="folder">Открыть папку</a>
-    <a id="chk">Проверить обновления</a>
-    <span id="note"></span>
-  </footer>
+  <!-- СЕРВЕРЫ -->
+  <section class="page" id="p-servers">
+    <h2>Серверы</h2>
+    <section class="card">
+      <div class="hd">
+        <h3>Список<em id="cnt"></em></h3>
+        <button class="ghost" id="refresh" title="Обновить список и пинг" aria-label="Обновить список и пинг">↻ Обновить</button>
+      </div>
+      <div id="srvlist"></div>
+      <p class="hint" id="pinghint"></p>
+    </section>
+    <section class="card">
+      <div class="hd"><h3>Ссылка или подписка</h3></div>
+      <textarea id="link" spellcheck="false" placeholder="vless://… или адрес подписки"></textarea>
+      <button class="primary" id="save">Сохранить и подключить</button>
+    </section>
+  </section>
+
+  <!-- НАСТРОЙКИ -->
+  <section class="page" id="p-settings">
+    <h2>Настройки</h2>
+    <section class="card">
+      <div class="hd"><h3>Подключение</h3></div>
+      <label class="t"><span>Россия напрямую<small>.ru, .su, .рф и местные сервисы мимо VPN</small></span>
+        <span class="sw"><input type="checkbox" id="bypass_ru"><i></i></span></label>
+      <label class="t"><span>Автопереключение<small>если связь пропала, перейти на лучший рабочий сервер</small></span>
+        <span class="sw"><input type="checkbox" id="auto_switch"><i></i></span></label>
+      <label class="t"><span>Подключаться при запуске</span>
+        <span class="sw"><input type="checkbox" id="autoconnect"><i></i></span></label>
+    </section>
+
+    <section class="card">
+      <div class="hd"><h3>Программы мимо VPN</h3></div>
+      <div class="chips" id="apps"></div>
+      <div class="addrow"><input class="txt" id="appin" placeholder="например chrome.exe или game.exe" spellcheck="false"><button class="primary" id="appadd">Добавить</button></div>
+      <p class="hint">Трафик этих программ пойдёт напрямую, остальное через VPN. Имя процесса видно в диспетчере задач.</p>
+    </section>
+
+    <section class="card">
+      <div class="hd"><h3>Telegram</h3></div>
+      <label class="t"><span>Обход блокировки Telegram<small>свой прокси без VPN, работает по WebSocket</small></span>
+        <span class="sw"><input type="checkbox" id="tg_proxy"><i></i></span></label>
+      <div id="tgbox" style="display:none">
+        <div class="btnrow">
+          <button class="primary" id="tgadd">Добавить в Telegram</button>
+          <button class="ghost" id="tgcopy">Копировать ссылку</button>
+        </div>
+        <p class="hint">Нажми один раз и подтверди в Telegram. Прокси 127.0.0.1:1443 работает, пока Nyxar запущен.</p>
+      </div>
+      <div id="tgerr"></div>
+    </section>
+
+    <section class="card">
+      <div class="hd"><h3>Система</h3></div>
+      <label class="t"><span>Запускать с Windows<small>сворачивается в трей</small></span>
+        <span class="sw"><input type="checkbox" id="autostart"><i></i></span></label>
+      <label class="t"><span>Обновлять автоматически<small>с GitHub, когда VPN не подключён</small></span>
+        <span class="sw"><input type="checkbox" id="auto_update"><i></i></span></label>
+      <label class="t"><span>Подробный лог<small>для диагностики, файл быстро растёт</small></span>
+        <span class="sw"><input type="checkbox" id="verbose"><i></i></span></label>
+    </section>
+
+    <section class="card" id="logcard">
+      <div class="hd"><h3>Лог ядра</h3>
+        <span><button class="ghost" id="logr">Обновить</button> <button class="ghost" id="logc">Копировать</button></span>
+      </div>
+      <pre id="logbox"></pre>
+    </section>
+
+    <div class="links">
+      <a id="log">Показать лог</a>
+      <a id="folder">Открыть папку</a>
+      <a id="chk">Проверить обновления</a>
+    </div>
+    <div id="note"></div>
+  </section>
 </main>
+
+<nav>
+  <div class="tabs" id="tabs">
+    <i></i>
+    <button class="tab on" data-p="home"><svg viewBox="0 0 24 24"><path d="M3 11.5 12 4l9 7.5"/><path d="M5.5 10v9.5h13V10"/></svg>Главная</button>
+    <button class="tab" data-p="servers"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6.5" rx="2"/><rect x="3" y="13.5" width="18" height="6.5" rx="2"/><path d="M7 7.2h.01M7 16.7h.01"/></svg>Серверы</button>
+    <button class="tab" data-p="settings"><svg viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2.2"/><circle cx="8" cy="17" r="2.2"/></svg>Настройки</button>
+  </div>
+</nav>
 
 <script>
   const $ = (id) => document.getElementById(id);
-  let tgLink = '';
   const send = (o) => window.ipc.postMessage(JSON.stringify(o));
-  let first = true;
-  let cur = 'auto';
+  let tgLink = '', first = true, cur = 'auto', apps = [], lastSrvSig = '', lastAppsSig = '';
+  const PAGES = ['home', 'servers', 'settings'];
 
-  function row(key, name, sub, ping, live) {
+  // ───── вкладки ─────
+  function go(name) {
+    const i = Math.max(0, PAGES.indexOf(name));
+    PAGES.forEach((p) => $('p-' + p).classList.toggle('on', p === PAGES[i]));
+    document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('on', t.dataset.p === PAGES[i]));
+    $('tabs').style.setProperty('--idx', i);
+    window.scrollTo({ top: 0 });
+    try { localStorage.setItem('tab', PAGES[i]); } catch (e) {}
+  }
+  document.querySelectorAll('.tab').forEach((t) => t.onclick = () => go(t.dataset.p));
+  $('gosrv').onclick = () => go('servers');
+
+  // ───── форматирование ─────
+  function bytes(n) {
+    if (n < 1024) return [n, 'Б'];
+    const u = ['КБ', 'МБ', 'ГБ', 'ТБ']; let i = -1;
+    do { n /= 1024; i++; } while (n >= 1024 && i < 3);
+    return [n >= 100 ? n.toFixed(0) : n.toFixed(1), u[i]];
+  }
+  const speed = (n) => { const [v, u] = bytes(n); return v + ' <i>' + u + '/с</i>'; };
+  const size = (n) => { const [v, u] = bytes(n); return v + ' <i>' + u + '</i>'; };
+  function dur(s) {
+    const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60;
+    return h ? h + ':' + String(m).padStart(2, '0') + ':' + String(x).padStart(2, '0') : m + ':' + String(x).padStart(2, '0');
+  }
+
+  // ───── серверы ─────
+  function row(key, name, sub, ping, live, best, i) {
     const d = document.createElement('div');
-    d.className = 'srv' + (key === cur ? ' sel' : '') + (live ? ' live' : '');
+    d.className = 'srv' + (key === cur ? ' sel' : '') + (live ? ' live' : '') + (key !== 'auto' && ping == null ? ' dead' : '');
+    d.style.setProperty('--i', Math.min(i, 14));
     const dot = document.createElement('i'); dot.className = 'dot';
     const nm = document.createElement('span'); nm.className = 'nm';
     nm.textContent = name + (live ? ' · подключено' : '');
+    if (best) { const t = document.createElement('span'); t.className = 'tag'; t.textContent = 'быстрый'; nm.appendChild(t); }
     if (sub) { const s = document.createElement('small'); s.textContent = sub; nm.appendChild(s); }
     d.append(dot, nm);
     if (key !== 'auto') {
@@ -219,20 +368,58 @@
   }
 
   function renderServers(s) {
-    $('srvlist').innerHTML = '';
+    // перерисовываем список только если он изменился: иначе анимация появления играла бы каждые 2 секунды
+    const sig = JSON.stringify([s.servers, s.selected, s.connected_key, s.refreshing, !!s.link]);
+    $('refresh').classList.toggle('spin', !!s.refreshing);
+    $('cnt').textContent = s.servers.length ? s.servers.length : '';
     const known = s.selected === 'auto' || s.servers.some((v) => v.key === s.selected);
     cur = known ? s.selected : 'auto';
-    const best = s.servers.filter((v) => v.ping != null).sort((a, b) => a.ping - b.ping)[0];
-    row('auto', 'Авто', best ? 'сейчас лучший: ' + best.name + ' · ' + best.ping + ' мс' : 'выберется по пингу при подключении');
-    s.servers.forEach((v) => row(v.key, v.name, '', v.ping, v.key === s.connected_key));
+    const alive = s.servers.filter((v) => v.ping != null).sort((a, b) => a.ping - b.ping);
+    const best = alive[0];
+    $('pinghint').textContent = s.servers.length ? 'Пинг — время ответа сервера. Пока VPN включён, он не обновляется, чтобы не врать.' : '';
+    // главная: быстрая плитка
+    const sel = s.servers.find((v) => v.key === cur);
+    $('q-name').textContent = s.status === 'on' && s.sub ? s.sub : (cur === 'auto' ? 'Авто' : (sel ? sel.name : 'Сервер'));
+    $('q-sub').textContent = s.servers.length ? (cur === 'auto' ? 'выбирается по пингу' : 'выбран вручную') + ' · серверов: ' + s.servers.length : 'добавь подписку';
+    if (sig === lastSrvSig) return;
+    lastSrvSig = sig;
+    $('srvlist').innerHTML = '';
+    row('auto', 'Авто', best ? 'сейчас лучший: ' + best.name + ' · ' + best.ping + ' мс' : 'выберется по пингу при подключении', null, false, false, 0);
+    s.servers.forEach((v, i) => row(v.key, v.name, '', v.ping, v.key === s.connected_key, best && best.key === v.key && alive.length > 1, i + 1));
     if (!s.servers.length) {
       const e = document.createElement('div'); e.className = 'empty';
-      e.textContent = s.link ? (s.refreshing ? 'Загружаю список…' : 'Серверов пока нет. Проверь ссылку и нажми ↻.') : 'Добавь ссылку на подписку ниже, и серверы появятся здесь.';
+      e.textContent = s.link ? (s.refreshing ? 'Загружаю список…' : 'Серверов пока нет. Проверь ссылку и нажми «Обновить».') : 'Добавь ссылку на подписку ниже, и серверы появятся здесь.';
       $('srvlist').appendChild(e);
     }
-    $('cnt').textContent = s.servers.length ? s.servers.length : '';
-    $('refresh').classList.toggle('spin', !!s.refreshing);
   }
+
+  // ───── программы мимо VPN ─────
+  function renderApps(list) {
+    apps = list.slice();
+    const sig = JSON.stringify(list);
+    if (sig === lastAppsSig) return;
+    lastAppsSig = sig;
+    $('apps').innerHTML = '';
+    list.forEach((a) => {
+      const c = document.createElement('span'); c.className = 'chip'; c.textContent = a;
+      const x = document.createElement('button'); x.textContent = '×'; x.title = 'Убрать';
+      x.onclick = () => { apps = apps.filter((v) => v !== a); send({ cmd: 'apps', list: apps }); };
+      c.appendChild(x); $('apps').appendChild(c);
+    });
+    if (!list.length) { const e = document.createElement('span'); e.className = 'hint'; e.style.margin = '0'; e.textContent = 'Пока пусто: всё идёт через VPN.'; $('apps').appendChild(e); }
+  }
+  function addApp() {
+    let v = $('appin').value.trim().replace(/^"|"$/g, '');
+    if (!v) return;
+    if (!/\.[a-z0-9]+$/i.test(v)) v += '.exe';
+    if (!apps.some((a) => a.toLowerCase() === v.toLowerCase())) { apps = apps.concat(v); send({ cmd: 'apps', list: apps }); }
+    $('appin').value = '';
+  }
+  $('appadd').onclick = addApp;
+  $('appin').onkeydown = (e) => { if (e.key === 'Enter') addApp(); };
+
+  // ───── состояние от программы ─────
+  function setStat(id, html, on) { const el = $(id); if (el.innerHTML !== html) el.innerHTML = html; el.parentElement.classList.toggle('dim', !on); }
 
   window.__state = function (s) {
     document.body.className = 'st-' + s.status;
@@ -242,8 +429,15 @@
     e.style.display = s.error ? 'block' : 'none';
     e.textContent = s.error;
     renderServers(s);
+    renderApps(s.bypass_apps || []);
 
-    ['bypass_ru', 'autostart', 'autoconnect', 'auto_update', 'verbose', 'tg_proxy'].forEach((k) => { $(k).checked = !!s[k]; });
+    const on = s.status === 'on';
+    setStat('v-down', on ? speed(s.down_speed) : '—', on);
+    setStat('v-up', on ? speed(s.up_speed) : '—', on);
+    setStat('v-total', on ? size(s.down + s.up) : '—', on);
+    setStat('v-time', on ? dur(s.uptime) : '—', on);
+
+    ['bypass_ru', 'autostart', 'autoconnect', 'auto_update', 'verbose', 'tg_proxy', 'auto_switch'].forEach((k) => { $(k).checked = !!s[k]; });
     tgLink = s.tg_link || '';
     $('tgbox').style.display = s.tg_proxy ? 'block' : 'none';
     $('tgerr').style.display = s.tg_error ? 'block' : 'none';
@@ -261,7 +455,12 @@
     $('note').textContent = s.update_note || '';
 
     if (first || document.activeElement !== $('link')) $('link').value = s.link;
-    if (first && !s.link) $('link').focus();
+    if (first) {
+      let tab = 'home';
+      try { tab = localStorage.getItem('tab') || 'home'; } catch (e2) {}
+      go(s.link ? tab : 'servers'); // без подписки сразу показываем, куда её вставить
+      if (!s.link) $('link').focus();
+    }
     first = false;
   };
 
@@ -271,38 +470,31 @@
     b.scrollTop = b.scrollHeight;
   };
 
+  // ───── действия ─────
   $('power').onclick = () => send({ cmd: 'toggle' });
   $('refresh').onclick = () => send({ cmd: 'refresh' });
   $('tgadd').onclick = () => send({ cmd: 'tg_add' });
-  $('tgcopy').onclick = () => {
-    const done = () => { $('tgcopy').textContent = 'Скопировано'; setTimeout(() => { $('tgcopy').textContent = 'Копировать ссылку'; }, 1500); };
-    try { navigator.clipboard.writeText(tgLink).then(done, () => fallbackCopy(tgLink, done)); } catch (e) { fallbackCopy(tgLink, done); }
-  };
-  function fallbackCopy(t, done) {
-    const a = document.createElement('textarea'); a.value = t; document.body.appendChild(a); a.select();
-    try { document.execCommand('copy'); done(); } catch (e) {} a.remove();
+  function copyText(t, done) {
+    const fb = () => { const a = document.createElement('textarea'); a.value = t; document.body.appendChild(a); a.select(); try { document.execCommand('copy'); done(); } catch (e) {} a.remove(); };
+    try { navigator.clipboard.writeText(t).then(done, fb); } catch (e) { fb(); }
   }
-  ['bypass_ru', 'autostart', 'autoconnect', 'auto_update', 'verbose', 'tg_proxy'].forEach((k) =>
+  $('tgcopy').onclick = () => copyText(tgLink, () => { $('tgcopy').textContent = 'Скопировано'; setTimeout(() => { $('tgcopy').textContent = 'Копировать ссылку'; }, 1500); });
+  ['bypass_ru', 'autostart', 'autoconnect', 'auto_update', 'verbose', 'tg_proxy', 'auto_switch'].forEach((k) =>
     $(k).onchange = (e) => send({ cmd: 'set', key: k, value: e.target.checked }));
-  $('save').onclick = () => send({ cmd: 'save', link: $('link').value.trim() });
+  $('save').onclick = () => { send({ cmd: 'save', link: $('link').value.trim() }); go('home'); };
   $('updbtn').onclick = () => send({ cmd: 'do_update' });
   $('chk').onclick = () => send({ cmd: 'check_update' });
   $('folder').onclick = () => send({ cmd: 'folder' });
   $('logr').onclick = () => send({ cmd: 'log' });
-  $('logc').onclick = () => {
-    const text = $('logbox').textContent;
-    const done = () => { $('logc').textContent = 'Скопировано'; setTimeout(() => $('logc').textContent = 'Копировать', 1500); };
-    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, () => {});
-    else { const r = document.createRange(); r.selectNodeContents($('logbox')); const s = getSelection(); s.removeAllRanges(); s.addRange(r); document.execCommand('copy'); done(); }
-  };
+  $('logc').onclick = () => copyText($('logbox').textContent, () => { $('logc').textContent = 'Скопировано'; setTimeout(() => $('logc').textContent = 'Копировать', 1500); });
   $('log').onclick = () => {
     const c = $('logcard');
     const show = c.style.display !== 'block';
     c.style.display = show ? 'block' : 'none';
     $('log').textContent = show ? 'Скрыть лог' : 'Показать лог';
-    if (show) { send({ cmd: 'log' }); c.scrollIntoView({ behavior: 'smooth', block: 'end' }); }
+    if (show) { send({ cmd: 'log' }); c.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
   };
-  document.addEventListener('contextmenu', (e) => { if (!/TEXTAREA|PRE/.test(e.target.tagName)) e.preventDefault(); });
+  document.addEventListener('contextmenu', (e) => { if (!/TEXTAREA|PRE|INPUT/.test(e.target.tagName)) e.preventDefault(); });
   send({ cmd: 'ready' });
 </script>
 </html>
