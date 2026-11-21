@@ -10,8 +10,10 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  windows:
     runs-on: windows-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -85,27 +87,162 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  android:
+    runs-on: ubuntu-latest
+    env:
+      SING_BOX_TAG: v1.14.4
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version
+        id: ver
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            v="${GITHUB_REF_NAME#v}"
+          else
+            v="$(sed -nE 's/^version = "(.+)"/\1/p' Cargo.toml | head -1)"
+          fi
+          IFS=. read -r major minor patch <<< "${v%%-*}"
+          code=$(( major * 10000 + minor * 100 + patch ))
+          printf 'VERSION_NAME=%s\nVERSION_CODE=%s\n' "$v" "$code" > android/version.properties
+          cat android/version.properties
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.5'
+          cache: false
+
+      - name: Android SDK and NDK
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;28.0.13004108" "platforms;android-36" > /dev/null
+
+      # ядро sing-box собирается в libbox.aar (arm64) из исходников; результат кэшируется по версии ядра
+      - name: Cache libbox
+        id: libbox-cache
+        uses: actions/cache@v4
+        with:
+          path: libbox.aar
+          key: libbox-${{ env.SING_BOX_TAG }}-arm64-v1
+
+      - name: Checkout sing-box
+        if: steps.libbox-cache.outputs.cache-hit != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: SagerNet/sing-box
+          ref: ${{ env.SING_BOX_TAG }}
+          path: sing-box
+
+      - name: Build libbox
+        if: steps.libbox-cache.outputs.cache-hit != 'true'
+        working-directory: sing-box
+        run: |
+          go install -v github.com/sagernet/gomobile/cmd/gomobile@v0.1.13
+          go install -v github.com/sagernet/gomobile/cmd/gobind@v0.1.13
+          go run ./cmd/internal/build_libbox -target android -platform android/arm64
+          cp libbox.aar ../libbox.aar
+
+      - name: Put libbox into the app
+        run: |
+          ls -l libbox.aar
+          cp libbox.aar android/app/libs/libbox.aar
+
+      # ключ подписи: из секретов, иначе создаётся один раз и хранится в кэше (чтобы обновления APK ставились поверх)
+      - name: Restore generated signing key
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/nyxar-keystore
+          key: nyxar-keystore-v1
+
+      - name: Signing key
+        env:
+          KS_B64: ${{ secrets.NYXAR_KEYSTORE_B64 }}
+          KS_PASSWORD: ${{ secrets.NYXAR_KEYSTORE_PASSWORD }}
+        run: |
+          dir="$RUNNER_TEMP/nyxar-keystore"
+          mkdir -p "$dir"
+          if [ -n "$KS_B64" ]; then
+            echo "$KS_B64" | base64 -d > "$dir/secret.jks"
+            ks="$dir/secret.jks"; pw="$KS_PASSWORD"
+            echo "Подпись: ключ из секретов"
+          else
+            ks="$dir/nyxar.jks"; pw="nyxar-ci-key"
+            if [ ! -f "$ks" ]; then
+              keytool -genkeypair -keystore "$ks" -storepass "$pw" -keypass "$pw" -alias nyxar \
+                -keyalg RSA -keysize 4096 -validity 36500 -dname "CN=Nyxar"
+              echo "Подпись: создан новый ключ"
+            else
+              echo "Подпись: ключ из кэша"
+            fi
+          fi
+          echo "NYXAR_KEYSTORE=$ks" >> "$GITHUB_ENV"
+          echo "NYXAR_KEYSTORE_PASSWORD=$pw" >> "$GITHUB_ENV"
+          echo "NYXAR_KEY_ALIAS=nyxar" >> "$GITHUB_ENV"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.7.0'
+
+      - name: Build APK
+        working-directory: android
+        run: gradle --no-daemon --stacktrace assembleRelease
+
+      - name: Collect and verify APK
+        run: |
+          mkdir -p dist
+          cp android/app/build/outputs/apk/release/*.apk "dist/Nyxar-${{ steps.ver.outputs.version }}.apk"
+          apksigner="$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)"
+          "$apksigner" verify --print-certs "dist/Nyxar-${{ steps.ver.outputs.version }}.apk"
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nyxar-android
+          path: dist/*.apk
+          if-no-files-found: error
+
+  release:
+    needs: [windows, android]
+    # релиз создаётся для версии из Cargo.toml (или из тега v*), если такого релиза ещё нет
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
       - name: Publish release
-        # релиз создаётся для версии из Cargo.toml (или из тега v*), если такого релиза ещё нет
-        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
-        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.windows.outputs.version }}
         run: |
-          $v = '${{ steps.ver.outputs.version }}'
-          $tag = "v$v"
-          gh release view $tag *> $null
-          if ($LASTEXITCODE -eq 0) {
-            Write-Host "Релиз $tag уже существует, пропускаю"
+          set -e
+          tag="v$VERSION"
+          ls -l dist
+          if gh release view "$tag" > /dev/null 2>&1; then
+            echo "Релиз $tag уже существует, пропускаю"
             exit 0
-          }
-          $notes = @"
-          Nyxar $v
+          fi
+          cat > notes.md <<EOF
+          Nyxar $VERSION
 
-          - ``Nyxar-Setup-$v.exe``: установщик (ярлык в меню «Пуск», удаление через «Приложения»)
-          - ``nyxar.exe``: один файл без установки, запускать от администратора
+          **Windows**
+          - \`Nyxar-Setup-$VERSION.exe\`: установщик (ярлык в меню «Пуск», удаление через «Приложения»)
+          - \`nyxar.exe\`: один файл без установки, запускать от администратора
 
-          Ядро sing-box и драйвер wintun уже внутри. При первом запуске они распаковываются в ``%LOCALAPPDATA%\Nyxar``.
-          "@
-          gh release create $tag dist\nyxar.exe "dist\Nyxar-Setup-$v.exe" --target $env:GITHUB_SHA --title "Nyxar $v" --notes $notes
-          if ($LASTEXITCODE -ne 0) { throw "gh release create failed: $LASTEXITCODE" }
+          Ядро sing-box и драйвер wintun уже внутри. При первом запуске они распаковываются в \`%LOCALAPPDATA%\\Nyxar\`.
+
+          **Android** (7.0+, arm64)
+          - \`Nyxar-$VERSION.apk\`: установить, разрешить установку из неизвестных источников, вставить ссылку подписки.
+          EOF
+          sed -i 's/^          //' notes.md
+          gh release create "$tag" dist/nyxar.exe "dist/Nyxar-Setup-$VERSION.exe" "dist/Nyxar-$VERSION.apk" \
+            --target "$GITHUB_SHA" --title "Nyxar $VERSION" --notes-file notes.md

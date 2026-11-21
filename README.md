@@ -36,6 +36,10 @@
 
 Ядро `sing-box` и драйвер `wintun` вшиты внутрь, при первом запуске они распаковываются в `%LOCALAPPDATA%\Nyxar`.
 
+### Android
+
+Скачай `Nyxar-X.Y.Z.apk` из тех же Releases (Android 7.0+, arm64), разреши установку из неизвестных источников, открой приложение и вставь ссылку подписки. Приложение собрано на том же ядре `sing-box`, исходники лежат в папке [`android`](android).
+
 ## Использование
 
 1. Запусти Nyxar. Windows запросит права администратора, они нужны для создания TUN-адаптера. Окно откроется сразу.
@@ -71,6 +75,12 @@ cargo build --release
 ```
 
 Готовый файл: `target\release\nyxar.exe`. Положи рядом `sing-box.exe` и `wintun.dll`.
+
+### Android
+
+APK собирает GitHub Actions: ядро `sing-box` компилируется в `libbox.aar`, затем Gradle собирает приложение. Локально нужны JDK 17, Go, Android SDK с NDK 28 и `gomobile`; порядок команд смотри в `.github/workflows/build.yml`.
+
+Подпись APK: если в репозитории есть секреты `NYXAR_KEYSTORE_B64` (keystore в base64) и `NYXAR_KEYSTORE_PASSWORD`, используется этот ключ. Иначе ключ создаётся один раз и хранится в кэше Actions. Чтобы обновления APK всегда ставились поверх, лучше задать секреты.
 
 ## Где хранятся данные
 
