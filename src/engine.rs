@@ -349,23 +349,25 @@ pub fn parse_server(link: &str) -> Option<Server> {
 
 pub fn load_servers(src: &str) -> Result<Vec<Server>, String> {
     let mut seen = std::collections::HashSet::new();
-    let mut unsupported = 0usize;
+    let mut reasons: Vec<(String, usize)> = Vec::new();
     let mut dummy = 0usize;
     let mut servers: Vec<Server> = Vec::new();
     for s in fetch_links(src)?.iter().filter_map(|l| parse_server(l)) {
         if is_dummy(&s) {
             dummy += 1;
-        } else if vless_outbound(&s.link).is_err() {
-            unsupported += 1;
+        } else if let Err(why) = vless_outbound(&s.link) {
+            let why = why.to_string();
+            match reasons.iter_mut().find(|(r, _)| *r == why) {
+                Some(e) => e.1 += 1,
+                None => reasons.push((why, 1)),
+            }
         } else if seen.insert(s.key()) {
             servers.push(s);
         }
     }
     if servers.is_empty() {
-        Err(format!(
-            "Нет рабочих серверов: отброшено {dummy} служебных записей и {unsupported} \
-             с неподдерживаемым транспортом (xhttp, kcp и т.п.)"
-        ))
+        let detail: String = reasons.iter().map(|(r, n)| format!("\n• {r}: {n}")).collect();
+        Err(format!("Нет рабочих серверов. Служебных записей: {dummy}.{}", if detail.is_empty() { String::new() } else { format!("\nОтброшены:{detail}") }))
     } else {
         Ok(servers)
     }

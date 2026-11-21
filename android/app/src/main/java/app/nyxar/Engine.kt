@@ -221,22 +221,24 @@ object Engine {
     fun loadServers(src: String): List<Server> {
         val seen = HashSet<String>()
         var dummy = 0
-        var unsupported = 0
+        val reasons = LinkedHashMap<String, Int>()
         val out = ArrayList<Server>()
         for (link in fetchLinks(src)) {
             val s = parseServer(link) ?: continue
             if (isDummy(s)) {
                 dummy++
-            } else if (runCatching { vlessOutbound(s.link) }.isFailure) {
-                unsupported++
+            } else if (runCatching { vlessOutbound(s.link) }.exceptionOrNull() != null) {
+                val why = runCatching { vlessOutbound(s.link) }.exceptionOrNull()?.message ?: "ошибка"
+                reasons[why] = (reasons[why] ?: 0) + 1
             } else if (seen.add(s.key)) {
                 out.add(s)
             }
         }
         if (out.isEmpty()) {
+            val detail = reasons.entries.joinToString("\n") { "• ${it.key}: ${it.value}" }
             throw NyxarException(
-                "Нет рабочих серверов: отброшено $dummy служебных записей и $unsupported " +
-                    "с неподдерживаемым транспортом (xhttp, kcp и т.п.)",
+                "Нет рабочих серверов. Служебных записей: $dummy." +
+                    (if (detail.isNotEmpty()) "\nОтброшены:\n$detail" else ""),
             )
         }
         return out
