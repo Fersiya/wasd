@@ -1537,7 +1537,7 @@ dependencies = [
 
 [[package]]
 name = "nyxar"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "aes",
  "base64",

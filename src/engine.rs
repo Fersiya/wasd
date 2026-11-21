@@ -117,6 +117,27 @@ const CORE_FILES: &[(&str, &[u8])] = &[
     ("xray.exe", include_bytes!("../assets/xray.exe.gz")),
 ];
 
+/// Завершает sing-box.exe / xray.exe, запущенные из папки ядра Nyxar (остались от прошлого запуска).
+#[cfg(feature = "embed")]
+fn kill_stale_core(dir: &std::path::Path) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let d = dir.display().to_string().replace('\'', "''");
+        let script = format!(
+            "Get-Process sing-box,xray -ErrorAction SilentlyContinue | \
+             Where-Object {{ $_.Path -and $_.Path.StartsWith('{d}', [StringComparison]::OrdinalIgnoreCase) }} | \
+             Stop-Process -Force"
+        );
+        let _ = Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .creation_flags(0x0800_0000)
+            .status();
+    }
+    #[cfg(not(windows))]
+    let _ = dir;
+}
+
 /// Распаковывает вшитое ядро в <data>/core (один раз на версию программы).
 #[cfg(feature = "embed")]
 fn embedded_core() -> Option<Result<PathBuf, String>> {
@@ -136,8 +157,21 @@ fn embedded_core() -> Option<Result<PathBuf, String>> {
             }
             let tmp = dir.join(format!("{name}.new"));
             fs::write(&tmp, &bytes).map_err(|e| format!("Не записался {name}: {e}"))?;
-            fs::rename(&tmp, dir.join(name)).map_err(|e| {
-                format!("Не удалось обновить {name} (закрой другие копии Nyxar): {e}")
+            let mut res = fs::rename(&tmp, dir.join(name));
+            if res.is_err() {
+                // файл занят забытым ядром от прошлого запуска: гасим его и пробуем снова
+                kill_stale_core(&dir);
+                for _ in 0..8 {
+                    std::thread::sleep(Duration::from_millis(400));
+                    res = fs::rename(&tmp, dir.join(name));
+                    if res.is_ok() {
+                        break;
+                    }
+                }
+            }
+            res.map_err(|e| {
+                let _ = fs::remove_file(&tmp);
+                format!("Не удалось обновить {name}: {e}. Заверши процессы sing-box.exe и xray.exe в диспетчере задач.")
             })?;
         }
         fs::write(&marker, ver).map_err(|e| format!("Не записалась версия ядра: {e}"))?;
