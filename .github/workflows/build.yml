@@ -193,9 +193,13 @@ jobs:
           dir="$RUNNER_TEMP/nyxar-keystore"
           mkdir -p "$dir"
           if [ -n "$KS_B64" ]; then
-            echo "$KS_B64" | base64 -d > "$dir/secret.jks"
+            printf '%s' "$KS_B64" | tr -d ' \r\n\t' | base64 -d > "$dir/secret.jks"
             ks="$dir/secret.jks"; pw="$KS_PASSWORD"
-            echo "Подпись: ключ из секретов"
+            echo "Подпись: ключ из секретов (размер файла ключа: $(stat -c %s "$ks") байт, длина base64: ${#KS_B64}, пароль: ${#KS_PASSWORD} символов)"
+            if ! keytool -list -keystore "$ks" -storepass "$pw" -alias nyxar >/dev/null 2>&1; then
+              echo "::error::Ключ из секретов не читается. Ожидается NYXAR_KEYSTORE_B64 длиной 5664 символа (файл 4246 байт) и NYXAR_KEYSTORE_PASSWORD длиной 20 символов. Вставь значения заново целиком, без кавычек."
+              exit 1
+            fi
           else
             ks="$dir/nyxar.jks"; pw="nyxar-ci-key"
             if [ ! -f "$ks" ]; then
