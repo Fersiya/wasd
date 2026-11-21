@@ -151,6 +151,7 @@ jobs:
       - name: Put libbox into the app
         run: |
           ls -l libbox.aar
+          mkdir -p android/app/libs
           cp libbox.aar android/app/libs/libbox.aar
 
       # ключ подписи: из секретов, иначе создаётся один раз и хранится в кэше (чтобы обновления APK ставились поверх)
