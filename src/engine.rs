@@ -962,11 +962,12 @@ pub fn open_data_dir() {
     let dir = data_dir();
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
-        // `start` поднимает окно проводника поверх остальных, чего не делает прямой запуск explorer
-        let _ = Command::new("cmd")
-            .raw_arg(format!("/C start \"\" \"{}\"", dir.display()))
-            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+        // ShellExecute открывает папку в проводнике поверх окон и работает и от администратора
+        if shell::open(&dir) {
+            return;
+        }
+        let _ = Command::new("explorer")
+            .arg(&dir)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn();
@@ -978,6 +979,36 @@ pub fn open_data_dir() {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn();
+    }
+}
+
+#[cfg(windows)]
+mod shell {
+    use std::{ffi::OsStr, os::windows::ffi::OsStrExt, path::Path, ptr};
+
+    #[link(name = "shell32")]
+    extern "system" {
+        fn ShellExecuteW(
+            hwnd: isize,
+            operation: *const u16,
+            file: *const u16,
+            parameters: *const u16,
+            directory: *const u16,
+            show: i32,
+        ) -> isize;
+    }
+
+    fn wide(s: &OsStr) -> Vec<u16> {
+        s.encode_wide().chain(std::iter::once(0)).collect()
+    }
+
+    /// true, если оболочка приняла запрос (результат больше 32).
+    pub fn open(path: &Path) -> bool {
+        let op = wide(OsStr::new("open"));
+        let file = wide(path.as_os_str());
+        // 1 = SW_SHOWNORMAL
+        let r = unsafe { ShellExecuteW(0, op.as_ptr(), file.as_ptr(), ptr::null(), ptr::null(), 1) };
+        r > 32
     }
 }
 
