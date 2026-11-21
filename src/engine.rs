@@ -1009,10 +1009,8 @@ mod win {
 
 /// Мягкая остановка: Ctrl+C и ожидание до 4 секунд, потом принудительно.
 pub fn stop_core(child: &mut Option<Child>) {
-    let Some(mut c) = child.take() else {
-        stop_sidecar();
-        return;
-    };
+    // Если процесса sing-box нет, xray не трогаем: он мог быть только что запущен новым подключением.
+    let Some(mut c) = child.take() else { return };
     #[cfg(windows)]
     {
         win::send_ctrl_c(c.id());

@@ -470,7 +470,9 @@ object Engine {
     /** null, если ссылку тянет sing-box или Xray; иначе причина отказа. */
     fun linkError(link: String): String? {
         if (runCatching { vlessOutbound(link) }.isSuccess) return null
-        return runCatching { xrayOutbound(link) }.exceptionOrNull()?.message ?: "ошибка"
+        val viaXray = runCatching { xrayOutbound(link) }
+        if (viaXray.isSuccess) return null
+        return viaXray.exceptionOrNull()?.message ?: "ошибка"
     }
 
     fun needsXray(link: String): Boolean =
