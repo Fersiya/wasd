@@ -261,11 +261,58 @@ object Engine {
             null
         }
 
-    /** Пингует все серверы параллельно (время TCP-подключения). */
+    /** Имя для SNI, если сервер работает поверх TLS или Reality (иначе рукопожатие не имеет смысла). */
+    internal fun tlsName(link: String): String? {
+        val v = parseVless(link) ?: return null
+        if (v.params["security"] != "tls" && v.params["security"] != "reality") return null
+        val name = (v.params["sni"] ?: v.params["serverName"]).orEmpty().ifEmpty { v.host }
+        // для IP-адреса без SNI рукопожатие смысла не имеет
+        return if (Regex("^[0-9.]+$").matches(name) || name.contains(':')) null else name
+    }
+
+    private val trustAll: javax.net.ssl.SSLSocketFactory by lazy {
+        val tm = object : javax.net.ssl.X509TrustManager {
+            override fun checkClientTrusted(chain: Array<java.security.cert.X509Certificate>?, authType: String?) {}
+            override fun checkServerTrusted(chain: Array<java.security.cert.X509Certificate>?, authType: String?) {}
+            override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = emptyArray()
+        }
+        val ctx = javax.net.ssl.SSLContext.getInstance("TLS")
+        ctx.init(null, arrayOf<javax.net.ssl.TrustManager>(tm), null)
+        ctx.socketFactory
+    }
+
+    /** Время TLS-рукопожатия с нужным SNI: честнее простого TCP, потому что доходит до самого сервера. */
+    private fun tlsPing(host: String, port: Int, sni: String): Int? =
+        try {
+            val t = System.nanoTime()
+            Socket().use { raw ->
+                raw.connect(InetSocketAddress(host, port), 2500)
+                raw.soTimeout = 2500
+                val ssl = trustAll.createSocket(raw, sni, port, false) as javax.net.ssl.SSLSocket
+                val params = ssl.sslParameters
+                params.serverNames = listOf(javax.net.ssl.SNIHostName(sni))
+                ssl.sslParameters = params
+                ssl.startHandshake()
+            }
+            ((System.nanoTime() - t) / 1_000_000).toInt()
+        } catch (_: Exception) {
+            null
+        }
+
+    private fun probe(s: Server): Int? {
+        val sni = tlsName(s.link) ?: return tcpPing(s.host, s.port)
+        val a = tlsPing(s.host, s.port, sni)
+        val b = tlsPing(s.host, s.port, sni)
+        val best = listOfNotNull(a, b).minOrNull()
+        // до Android 10 TLS 1.3 нет, а некоторые Reality-сайты его требуют: тогда хотя бы TCP
+        return best ?: if (android.os.Build.VERSION.SDK_INT < 29) tcpPing(s.host, s.port) else null
+    }
+
+    /** Пингует все серверы параллельно (TLS-рукопожатие, где возможно, иначе TCP). */
     fun pingAll(servers: List<Server>) {
         val pool = Executors.newFixedThreadPool(16)
         try {
-            val tasks = servers.map { s -> Callable { s.ping = tcpPing(s.host, s.port) } }
+            val tasks = servers.map { s -> Callable { s.ping = probe(s) } }
             pool.invokeAll(tasks)
         } finally {
             pool.shutdown()

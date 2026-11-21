@@ -21,4 +21,9 @@ class Prefs(context: Context) {
     var verbose: Boolean
         get() = sp.getBoolean("verbose", false)
         set(v) = sp.edit().putBoolean("verbose", v).apply()
+
+    /** Пакеты приложений, которые идут мимо VPN. */
+    var bypassApps: Set<String>
+        get() = sp.getStringSet("bypass_apps", emptySet())?.toSet() ?: emptySet()
+        set(v) = sp.edit().putStringSet("bypass_apps", v).apply()
 }

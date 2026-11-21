@@ -242,6 +242,13 @@ class NyxarVpnService : VpnService(), PlatformInterface, CommandServerHandler {
             builder.addDisallowedApplication(packageName)
         } catch (_: NameNotFoundException) {
         }
+        // программы, которые пользователь пустил мимо VPN
+        for (pkg in Prefs(this).bypassApps) {
+            try {
+                builder.addDisallowedApplication(pkg)
+            } catch (_: NameNotFoundException) {
+            }
+        }
 
         val inet4 = options.inet4Address
         while (inet4.hasNext()) {

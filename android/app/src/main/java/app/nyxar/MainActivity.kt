@@ -16,7 +16,12 @@ import android.text.InputType
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.animation.ObjectAnimator
+import android.animation.ValueAnimator
+import android.app.AlertDialog
+import android.view.animation.DecelerateInterpolator
 import android.widget.Button
+import android.widget.FrameLayout
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -49,6 +54,16 @@ class MainActivity : Activity() {
     private lateinit var linkInput: EditText
     private lateinit var logBox: TextView
     private lateinit var logCard: LinearLayout
+
+    private lateinit var pages: List<LinearLayout>
+    private lateinit var tabs: List<TextView>
+    private lateinit var scroll: ScrollView
+    private lateinit var appsText: TextView
+    private lateinit var quickName: TextView
+    private lateinit var quickSub: TextView
+    private var tab = 0
+    private var listSig = ""
+    private var pulse: ObjectAnimator? = null
 
     private var servers: List<Server> = emptyList()
     private var listError = ""
@@ -132,6 +147,12 @@ class MainActivity : Activity() {
         header.addView(text("  ${BuildConfig.VERSION_NAME}", 13f, MUTED))
         root.addView(header)
 
+        val pageHome = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val pageServers = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; visibility = View.GONE }
+        val pageSettings = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; visibility = View.GONE }
+        pages = listOf(pageHome, pageServers, pageSettings)
+        pages.forEach { root.addView(it) }
+
         // кнопка подключения и статус
         power = TextView(this).apply {
             gravity = Gravity.CENTER
@@ -149,10 +170,15 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER
             setPadding(0, dp(6), 0, 0)
         }
-        root.addView(
+        pageHome.addView(
             card(power, statusText, errorText).also {
                 (it.getChildAt(0).layoutParams as LinearLayout.LayoutParams).gravity = Gravity.CENTER_HORIZONTAL
             },
+        )
+        quickName = text("Сервер", 15f, TEXT, true)
+        quickSub = text("", 12f, MUTED)
+        pageHome.addView(
+            card(quickName, quickSub).apply { setOnClickListener { showTab(1) } },
         )
 
         // серверы
@@ -169,10 +195,10 @@ class MainActivity : Activity() {
         serversHeader.addView(serverCount)
         serversHeader.addView(refreshBtn)
         serverList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        root.addView(card(serversHeader, serverList))
+        pageServers.addView(card(serversHeader, serverList))
 
         // параметры
-        root.addView(
+        pageSettings.addView(
             card(
                 text("Параметры", 16f, TEXT, true),
                 toggle("Россия напрямую", ".ru, .su, .рф и местные сервисы мимо VPN", prefs.bypassRu) {
@@ -200,11 +226,23 @@ class MainActivity : Activity() {
             background = rounded(Color.parseColor("#0F1020"), 10, Color.parseColor("#2A2D4A"), 1)
             setPadding(dp(10), dp(8), dp(10), dp(8))
         }
-        root.addView(
+        pageServers.addView(
             card(
                 text("Ссылка или подписка", 16f, TEXT, true),
                 linkInput,
                 button("Сохранить и подключить") { saveAndConnect() },
+            ),
+        )
+
+        // программы мимо VPN
+        appsText = text("", 13f, MUTED).apply { setPadding(0, dp(6), 0, 0) }
+        pageSettings.addView(
+            card(
+                text("Программы мимо VPN", 16f, TEXT, true),
+                appsText,
+                button("Выбрать программы") { pickApps() },
+                text("Выбранные программы ходят напрямую, остальные через VPN. Изменения применяются при следующем подключении.", 12f, MUTED)
+                    .apply { setPadding(0, dp(8), 0, 0) },
             ),
         )
 
@@ -249,14 +287,42 @@ class MainActivity : Activity() {
                 }
             }
         }
-        root.addView(logToggle)
-        root.addView(logCard)
+        pageSettings.addView(logToggle)
+        pageSettings.addView(logCard)
 
-        setContentView(ScrollView(this).apply {
-            setBackgroundColor(BG)
+        scroll = ScrollView(this).apply {
             isFillViewport = true
             addView(root)
+        }
+        root.setPadding(dp(16), dp(20), dp(16), dp(96)) // место под нижнюю панель
+
+        // нижняя панель вкладок
+        val bar = LinearLayout(this).apply {
+            background = rounded(CARD, 20, Color.parseColor("#2A2D4A"), 1)
+            setPadding(dp(4), dp(4), dp(4), dp(4))
+            elevation = dp(8).toFloat()
+        }
+        tabs = listOf("Главная", "Серверы", "Настройки").mapIndexed { i, name ->
+            TextView(this).apply {
+                text = name
+                gravity = Gravity.CENTER
+                textSize = 13f
+                setPadding(0, dp(12), 0, dp(12))
+                setOnClickListener { showTab(i) }
+                bar.addView(this, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            }
+        }
+        setContentView(FrameLayout(this).apply {
+            setBackgroundColor(BG)
+            addView(scroll, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+            addView(
+                bar,
+                FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM)
+                    .apply { setMargins(dp(16), 0, dp(16), dp(14)) },
+            )
         })
+        showTab(if (prefs.link.isBlank()) 1 else 0, animate = false)
+        renderApps()
 
         if (Build.VERSION.SDK_INT >= 33) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQ_NOTIFICATIONS)
@@ -289,6 +355,22 @@ class MainActivity : Activity() {
             setColor(color)
         }
         statusText.text = status
+        if (st == Status.CONNECTING) {
+            if (pulse == null) {
+                pulse = ObjectAnimator.ofFloat(power, View.ALPHA, 1f, 0.55f).apply {
+                    duration = 700
+                    repeatMode = ValueAnimator.REVERSE
+                    repeatCount = ValueAnimator.INFINITE
+                    start()
+                }
+            }
+        } else {
+            pulse?.cancel()
+            pulse = null
+            power.alpha = 1f
+        }
+        quickName.text = if (st == Status.ON) VpnState.serverName else "Сервер"
+        quickSub.text = if (prefs.server == "auto") "выбирается по пингу · нажми, чтобы выбрать" else "выбран вручную · нажми, чтобы изменить"
         errorText.text = if (st == Status.ERROR) VpnState.error else ""
         errorText.visibility = if (errorText.text.isEmpty()) View.GONE else View.VISIBLE
     }
@@ -337,6 +419,9 @@ class MainActivity : Activity() {
     }
 
     private fun renderServers() {
+        val sig = "${servers.map { it.key + it.ping }}|${prefs.server}|${VpnState.status}|${VpnState.serverKey}|$refreshing|$listError"
+        if (sig == listSig) return
+        listSig = sig
         serverList.removeAllViews()
         refreshBtn.alpha = if (refreshing) 0.4f else 1f
         if (servers.isEmpty()) {
@@ -360,6 +445,78 @@ class MainActivity : Activity() {
         serverList.addView(serverRow("auto", autoName, null, false))
         // выбранный раньше сервер мог пропасть из подписки: тогда работает «Авто»
         servers.forEach { serverList.addView(serverRow(it.key, it.name, it.ping, true)) }
+        // плавное появление строк по очереди
+        for (i in 0 until serverList.childCount) {
+            serverList.getChildAt(i).apply {
+                alpha = 0f
+                translationY = dp(8).toFloat()
+                animate().alpha(1f).translationY(0f).setStartDelay((minOf(i, 14) * 20).toLong()).setDuration(260)
+                    .setInterpolator(DecelerateInterpolator()).start()
+            }
+        }
+    }
+
+    // ───────────────────────── вкладки ─────────────────────────
+
+    private fun showTab(i: Int, animate: Boolean = true) {
+        tab = i
+        pages.forEachIndexed { idx, p ->
+            if (idx == i) {
+                p.visibility = View.VISIBLE
+                if (animate) {
+                    p.alpha = 0f
+                    p.translationY = dp(12).toFloat()
+                    p.animate().alpha(1f).translationY(0f).setDuration(280).setInterpolator(DecelerateInterpolator()).start()
+                }
+            } else {
+                p.visibility = View.GONE
+            }
+        }
+        tabs.forEachIndexed { idx, t ->
+            t.setTextColor(if (idx == i) TEXT else MUTED)
+            t.setTypeface(null, if (idx == i) Typeface.BOLD else Typeface.NORMAL)
+            t.background = if (idx == i) rounded(Color.parseColor("#262A52"), 16, ACCENT, 1) else null
+        }
+        scroll.scrollTo(0, 0)
+    }
+
+    // ───────────────────────── программы мимо VPN ─────────────────────────
+
+    private fun renderApps() {
+        val pm = packageManager
+        val names = prefs.bypassApps.map { pkg ->
+            try { pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString() } catch (_: Exception) { pkg }
+        }.sorted()
+        appsText.text = if (names.isEmpty()) "Пока пусто: всё идёт через VPN." else names.joinToString(", ")
+    }
+
+    private fun pickApps() {
+        Thread {
+            val pm = packageManager
+            val launcher = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+            val apps = pm.queryIntentActivities(launcher, 0)
+                .map { it.activityInfo.packageName to it.loadLabel(pm).toString() }
+                .filter { it.first != packageName }
+                .distinctBy { it.first }
+                .sortedBy { it.second.lowercase() }
+            runOnUiThread {
+                if (isDestroyed) return@runOnUiThread
+                val chosen = prefs.bypassApps.toMutableSet()
+                val checked = BooleanArray(apps.size) { apps[it].first in chosen }
+                AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+                    .setTitle("Программы мимо VPN")
+                    .setMultiChoiceItems(apps.map { it.second }.toTypedArray(), checked) { _, i, on ->
+                        if (on) chosen.add(apps[i].first) else chosen.remove(apps[i].first)
+                    }
+                    .setPositiveButton("Готово") { _, _ ->
+                        prefs.bypassApps = chosen
+                        renderApps()
+                        restartIfActive()
+                    }
+                    .setNegativeButton("Отмена", null)
+                    .show()
+            }
+        }.start()
     }
 
     private fun showLog() {
