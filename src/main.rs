@@ -45,6 +45,8 @@ enum UserEvent {
     Traffic(Option<(u64, u64)>),
     /// Есть ли выход в интернет через туннель
     Health(bool),
+    /// Список программ для выбора: JSON-массив или текст ошибки
+    Apps(Result<String, String>),
     /// (процесс ядра, имя сервера, ключ сервера)
     Started(Result<(Child, String, String), String>),
     Servers(Result<Vec<Server>, String>),
@@ -108,6 +110,7 @@ struct App {
     speed: (u64, u64),
     last_traffic: Option<(u64, u64, Instant)>,
     health_fails: u32,
+    last_failover: Option<Instant>,
     stats_busy: Arc<AtomicBool>,
     health_busy: Arc<AtomicBool>,
     tick: u32,
@@ -510,6 +513,7 @@ fn main() {
         speed: (0, 0),
         last_traffic: None,
         health_fails: 0,
+        last_failover: None,
         stats_busy: Arc::new(AtomicBool::new(false)),
         health_busy: Arc::new(AtomicBool::new(false)),
         tick: 0,
@@ -603,13 +607,26 @@ fn main() {
                 }
             }
 
+            Event::UserEvent(UserEvent::Apps(res)) => {
+                if let Some(w) = &win {
+                    let js = match res {
+                        Ok(json) => format!("window.__apps({json}, \"\");"),
+                        Err(m) => format!("window.__apps([], {});", serde_json::to_string(&m).unwrap_or_else(|_| "\"\"".into())),
+                    };
+                    let _ = w.webview.evaluate_script(&js);
+                }
+            }
+
             Event::UserEvent(UserEvent::Health(ok)) => {
                 if app.st == St::On {
                     if ok {
                         app.health_fails = 0;
                     } else {
                         app.health_fails += 1;
-                        if app.health_fails >= 3 && app.settings.link.trim() != "" {
+                        // не чаще раза в 90 секунд: при полном отсутствии сети переключения бессмысленны
+                        let calm = app.last_failover.map(|t| t.elapsed() > Duration::from_secs(90)).unwrap_or(true);
+                        if app.health_fails >= 3 && calm && app.settings.link.trim() != "" {
+                            app.last_failover = Some(Instant::now());
                             failover(&proxy, &mut app);
                             sync(&app, &tray, &status_item, &toggle_item, &win);
                         }
@@ -732,6 +749,12 @@ fn main() {
                         if app.child.is_some() {
                             restart(&proxy, &mut app);
                         }
+                    }
+                    "list_apps" => {
+                        let p = proxy.clone();
+                        std::thread::spawn(move || {
+                            let _ = p.send_event(UserEvent::Apps(engine::list_apps()));
+                        });
                     }
                     "folder" => engine::open_data_dir(),
                     "tg_add" => {

@@ -210,7 +210,12 @@ pub fn load_settings() -> Settings {
 
 pub fn save_settings(s: &Settings) {
     if let Ok(text) = serde_json::to_string_pretty(s) {
-        let _ = fs::write(data_dir().join("settings.json"), text);
+        // сначала во временный файл: сбой посреди записи не испортит настройки
+        let dir = data_dir();
+        let tmp = dir.join("settings.json.tmp");
+        if fs::write(&tmp, text).is_ok() {
+            let _ = fs::rename(&tmp, dir.join("settings.json"));
+        }
     }
 }
 
@@ -330,7 +335,36 @@ fn download_subscription(url: &str, ua: &str) -> Result<String, ureq::Error> {
 }
 
 /// Принимает vless://, несколько ссылок или URL подписки.
+/// Удачный ответ подписки кэшируется: без сети Nyxar подключится по последнему списку.
 pub fn fetch_links(src: &str) -> Result<Vec<String>, String> {
+    let src = src.trim();
+    let online = src.starts_with("http://") || src.starts_with("https://");
+    let cache = data_dir().join("subscription.cache");
+    match fetch_links_net(src) {
+        Ok(list) => {
+            if online {
+                let _ = fs::write(&cache, format!("{src}\n{}", list.join("\n")));
+            }
+            Ok(list)
+        }
+        Err(e) => {
+            if online {
+                if let Ok(text) = fs::read_to_string(&cache) {
+                    let mut lines = text.lines();
+                    if lines.next() == Some(src) {
+                        let list: Vec<String> = lines.map(|l| l.to_string()).filter(|l| !l.is_empty()).collect();
+                        if !list.is_empty() {
+                            return Ok(list);
+                        }
+                    }
+                }
+            }
+            Err(e)
+        }
+    }
+}
+
+fn fetch_links_net(src: &str) -> Result<Vec<String>, String> {
     let src = src.trim();
     if src.is_empty() {
         return Err("Ссылка не задана: вставь её в поле внизу окна".into());
@@ -823,6 +857,7 @@ fn start_xray(core_dir: &std::path::Path, cfg: &Value, port: u16) -> Result<(), 
         .stderr(log_err);
     hide_window(&mut cmd);
     let mut child = cmd.spawn().map_err(|e| format!("Не запустился xray: {e}"))?;
+    adopt(&child);
 
     // ждём, пока xray начнёт слушать порт
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
@@ -845,6 +880,60 @@ fn start_xray(core_dir: &std::path::Path, cfg: &Value, port: u16) -> Result<(), 
         *g = Some(child);
     }
     Ok(())
+}
+
+/// Приложения для выбора «мимо VPN»: запущенные сейчас и из меню «Пуск».
+/// Возвращает JSON-массив вида [{"n":"Название","e":"app.exe","r":1}], r=1 значит «запущено».
+pub fn list_apps() -> Result<String, String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let script = r#"
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+$ErrorActionPreference = 'SilentlyContinue'
+$o = @{}
+Get-Process | Where-Object { $_.MainWindowTitle } | ForEach-Object {
+  $e = $_.ProcessName + '.exe'
+  $n = $null
+  try { $n = $_.MainModule.FileVersionInfo.ProductName } catch {}
+  if (-not $n) { $n = $_.ProcessName }
+  $o[$e.ToLower()] = @{ n = $n; e = $e; r = 1 }
+}
+$sh = New-Object -ComObject WScript.Shell
+$dirs = @("$env:ProgramData\Microsoft\Windows\Start Menu\Programs", "$env:APPDATA\Microsoft\Windows\Start Menu\Programs")
+foreach ($d in $dirs) {
+  Get-ChildItem -Path $d -Recurse -Filter *.lnk | ForEach-Object {
+    $t = $sh.CreateShortcut($_.FullName).TargetPath
+    if ($t -like '*.exe') {
+      $e = [IO.Path]::GetFileName($t)
+      if ($e -notmatch '^(unins|uninstall|setup|install)' -and -not $o.ContainsKey($e.ToLower())) {
+        $o[$e.ToLower()] = @{ n = $_.BaseName; e = $e; r = 0 }
+      }
+    }
+  }
+}
+$list = @($o.Values | ForEach-Object { [pscustomobject]$_ })
+ConvertTo-Json -InputObject $list -Compress
+"#;
+        let out = Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script])
+            .creation_flags(0x0800_0000)
+            .output()
+            .map_err(|e| format!("Не запустился PowerShell: {e}"))?;
+        let text = String::from_utf8_lossy(&out.stdout).trim().trim_start_matches('\u{feff}').to_string();
+        let v: Value = serde_json::from_str(&text).map_err(|_| "Не удалось получить список программ".to_string())?;
+        let mut items: Vec<Value> = match v {
+            Value::Array(a) => a,
+            Value::Object(_) => vec![v],
+            _ => vec![],
+        };
+        items.retain(|i| i["e"].as_str().map(|e| !e.eq_ignore_ascii_case("nyxar.exe")).unwrap_or(false));
+        Ok(Value::Array(items).to_string())
+    }
+    #[cfg(not(windows))]
+    {
+        Ok("[]".into())
+    }
 }
 
 static API_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
@@ -939,6 +1028,76 @@ pub fn build_config(outbound: Value, bypass_ru: bool, verbose: bool) -> Value {
 
 // ───────────────────────── процесс ядра ─────────────────────────
 
+/// Windows: процессы в задании умирают вместе с Nyxar, поэтому после сбоя не остаётся забытого ядра.
+#[cfg(windows)]
+mod job {
+    use std::os::windows::io::AsRawHandle;
+    use std::sync::OnceLock;
+
+    #[repr(C)]
+    struct Basic {
+        per_process_user_time: i64,
+        per_job_user_time: i64,
+        limit_flags: u32,
+        min_ws: usize,
+        max_ws: usize,
+        active_limit: u32,
+        affinity: usize,
+        priority: u32,
+        scheduling: u32,
+    }
+    #[repr(C)]
+    struct IoCounters([u64; 6]);
+    #[repr(C)]
+    struct Extended {
+        basic: Basic,
+        io: IoCounters,
+        process_mem: usize,
+        job_mem: usize,
+        peak_process: usize,
+        peak_job: usize,
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateJobObjectW(attrs: *const core::ffi::c_void, name: *const u16) -> isize;
+        fn SetInformationJobObject(job: isize, class: i32, info: *const core::ffi::c_void, len: u32) -> i32;
+        fn AssignProcessToJobObject(job: isize, process: *mut core::ffi::c_void) -> i32;
+    }
+
+    fn handle() -> isize {
+        static JOB: OnceLock<isize> = OnceLock::new();
+        *JOB.get_or_init(|| unsafe {
+            let h = CreateJobObjectW(core::ptr::null(), core::ptr::null());
+            if h == 0 {
+                return 0;
+            }
+            let mut info: Extended = core::mem::zeroed();
+            info.basic.limit_flags = 0x2000; // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            // 9 = JobObjectExtendedLimitInformation
+            SetInformationJobObject(h, 9, &info as *const _ as *const _, core::mem::size_of::<Extended>() as u32);
+            h
+        })
+    }
+
+    pub fn adopt(child: &std::process::Child) {
+        let h = handle();
+        if h != 0 {
+            unsafe {
+                AssignProcessToJobObject(h, child.as_raw_handle() as *mut _);
+            }
+        }
+    }
+}
+
+/// Привязывает дочерний процесс к жизни Nyxar (только Windows).
+fn adopt(child: &Child) {
+    #[cfg(windows)]
+    job::adopt(child);
+    #[cfg(not(windows))]
+    let _ = child;
+}
+
 fn hide_window(cmd: &mut Command) {
     #[cfg(windows)]
     {
@@ -1013,6 +1172,7 @@ pub fn start_core(s: &Settings) -> Result<(Child, String, String), String> {
     let child = cmd
         .spawn()
         .map_err(|e| { stop_sidecar(); format!("Не запустился sing-box: {e}") })?;
+    adopt(&child);
     let key = srv.key();
     Ok((child, srv.name, key))
 }

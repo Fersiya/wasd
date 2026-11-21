@@ -163,6 +163,21 @@
   .hint { color: var(--mute); font-size: 12px; margin: 8px 0 0; }
   .btnrow { display: flex; gap: 8px; margin-top: 10px; } .btnrow .primary { margin: 0; flex: 1; }
 
+  /* окно выбора программ */
+  #modal { position: fixed; inset: 0; z-index: 20; display: none; align-items: flex-end; justify-content: center; background: rgba(5,6,10,.66); backdrop-filter: blur(3px); }
+  #modal.on { display: flex; animation: fadeIn .2s both; }
+  .sheet { width: 100%; max-width: 560px; max-height: 86vh; display: flex; flex-direction: column; background: var(--card); border: 1px solid var(--line);
+    border-radius: 20px 20px 0 0; padding: 14px 16px 16px; animation: sheetIn .35s var(--ease) both; }
+  @keyframes sheetIn { from { transform: translateY(40px); opacity: 0; } to { transform: none; opacity: 1; } }
+  .sheet h3 { margin: 2px 0 10px; font-size: 16px; }
+  #applist { overflow-y: auto; margin: 10px -6px 12px; padding: 0 6px; min-height: 120px; }
+  .grp { color: var(--mute); font-size: 11.5px; text-transform: uppercase; letter-spacing: .5px; margin: 10px 2px 4px; }
+  .app { display: flex; align-items: center; gap: 10px; padding: 8px 8px; border-radius: 10px; cursor: pointer; transition: background .15s; }
+  .app:hover { background: #1c2030; }
+  .app .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .app .nm small { display: block; color: var(--mute); font-size: 12px; }
+  .app input { width: 18px; height: 18px; accent-color: var(--a1); }
+  .sheet .btnrow { margin-top: 0; }
   #logcard { display: none; }
   #logbox {
     margin: 0; max-height: 230px; overflow: auto; background: #0f121a; border: 1px solid var(--line); border-radius: 9px;
@@ -261,7 +276,8 @@
     <section class="card">
       <div class="hd"><h3>Программы мимо VPN</h3></div>
       <div class="chips" id="apps"></div>
-      <div class="addrow"><input class="txt" id="appin" placeholder="например chrome.exe или game.exe" spellcheck="false"><button class="primary" id="appadd">Добавить</button></div>
+      <button class="primary" id="apppick" style="margin-top:0">Выбрать из установленных</button>
+      <div class="addrow" style="margin-top:10px"><input class="txt" id="appin" placeholder="или впиши имя, например game.exe" spellcheck="false"><button class="primary" id="appadd">Добавить</button></div>
       <p class="hint">Трафик этих программ пойдёт напрямую, остальное через VPN. Имя процесса видно в диспетчере задач.</p>
     </section>
 
@@ -304,6 +320,15 @@
     <div id="note"></div>
   </section>
 </main>
+
+<div id="modal">
+  <div class="sheet">
+    <h3>Программы мимо VPN</h3>
+    <input class="txt" id="appq" placeholder="Поиск" spellcheck="false">
+    <div id="applist"><div class="empty">Ищу программы…</div></div>
+    <div class="btnrow"><button class="ghost" id="appcancel">Отмена</button><button class="primary" id="appdone">Готово</button></div>
+  </div>
+</div>
 
 <nav>
   <div class="tabs" id="tabs">
@@ -417,6 +442,49 @@
   }
   $('appadd').onclick = addApp;
   $('appin').onkeydown = (e) => { if (e.key === 'Enter') addApp(); };
+
+  // ───── выбор программ из списка ─────
+  let catalog = [], pick = new Set(), loaded = false;
+  const low = (x) => x.toLowerCase();
+  function drawApps() {
+    const q = low($('appq').value.trim()), box = $('applist');
+    box.innerHTML = '';
+    if (!loaded) { box.innerHTML = '<div class="empty">Ищу программы…</div>'; return; }
+    // выбранные, которых нет в каталоге (вписаны вручную), тоже показываем
+    const have = new Set(catalog.map((a) => low(a.e)));
+    const all = catalog.concat([...pick].filter((e) => !have.has(low(e))).map((e) => ({ n: e, e, r: 0 })));
+    const match = all.filter((a) => !q || low(a.n).includes(q) || low(a.e).includes(q));
+    const sec = (title, list) => {
+      if (!list.length) return;
+      const g = document.createElement('div'); g.className = 'grp'; g.textContent = title; box.appendChild(g);
+      list.forEach((a) => {
+        const r = document.createElement('label'); r.className = 'app';
+        const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = [...pick].some((x) => low(x) === low(a.e));
+        cb.onchange = () => { if (cb.checked) pick.add(a.e); else [...pick].forEach((x) => { if (low(x) === low(a.e)) pick.delete(x); }); };
+        const nm = document.createElement('span'); nm.className = 'nm'; nm.textContent = a.n;
+        if (low(a.n) !== low(a.e)) { const sm = document.createElement('small'); sm.textContent = a.e; nm.appendChild(sm); }
+        r.append(cb, nm); box.appendChild(r);
+      });
+    };
+    const byName = (a, b) => low(a.n).localeCompare(low(b.n), 'ru');
+    sec('Запущено сейчас', match.filter((a) => a.r).sort(byName));
+    sec('Установлено', match.filter((a) => !a.r).sort(byName));
+    if (!match.length) box.innerHTML = '<div class="empty">Ничего не нашёл.</div>';
+  }
+  window.__apps = function (list, err) {
+    catalog = Array.isArray(list) ? list : [];
+    loaded = true;
+    drawApps();
+    if (err) $('applist').insertAdjacentHTML('afterbegin', '<div class="empty">' + err + '</div>');
+  };
+  $('apppick').onclick = () => {
+    pick = new Set(apps); loaded = false; $('appq').value = '';
+    $('modal').classList.add('on'); drawApps(); send({ cmd: 'list_apps' });
+  };
+  $('appq').oninput = drawApps;
+  $('appcancel').onclick = () => $('modal').classList.remove('on');
+  $('appdone').onclick = () => { $('modal').classList.remove('on'); apps = [...pick]; send({ cmd: 'apps', list: apps }); };
+  $('modal').onclick = (e) => { if (e.target === $('modal')) $('modal').classList.remove('on'); };
 
   // ───── состояние от программы ─────
   function setStat(id, html, on) { const el = $(id); if (el.innerHTML !== html) el.innerHTML = html; el.parentElement.classList.toggle('dim', !on); }
