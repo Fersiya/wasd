@@ -411,6 +411,7 @@ fn main() {
             if let Some(c) = app.child.as_mut() {
                 if let Ok(Some(code)) = c.try_wait() {
                     app.child = None;
+                    engine::stop_sidecar();
                     let tail = engine::log_tail(900);
                     app.error = if tail.is_empty() {
                         format!("Ядро sing-box остановилось ({code}).")

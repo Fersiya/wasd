@@ -37,7 +37,13 @@ data class Server(
 }
 
 /** Всё, что нужно сервису для запуска ядра. */
-class Prepared(val server: Server, val config: JSONObject)
+class Prepared(
+    val server: Server,
+    val config: JSONObject,
+    /** Конфиг Xray и его локальный порт, если сервер работает через Xray (xhttp и др.). */
+    val xrayConfig: JSONObject? = null,
+    val xrayPort: Int = 0,
+)
 
 object Engine {
     /** Домены, которые при включённой опции идут напрямую, мимо VPN. */
@@ -227,8 +233,8 @@ object Engine {
             val s = parseServer(link) ?: continue
             if (isDummy(s)) {
                 dummy++
-            } else if (runCatching { vlessOutbound(s.link) }.exceptionOrNull() != null) {
-                val why = runCatching { vlessOutbound(s.link) }.exceptionOrNull()?.message ?: "ошибка"
+            } else if (linkError(s.link) != null) {
+                val why = linkError(s.link) ?: "ошибка"
                 reasons[why] = (reasons[why] ?: 0) + 1
             } else if (seen.add(s.key)) {
                 out.add(s)
@@ -368,6 +374,137 @@ object Engine {
         return out
     }
 
+    // ───────────────────── Xray (xhttp и др.) ─────────────────────
+    // sing-box не умеет xhttp и VLESS encryption. Такие серверы обслуживает Xray-core:
+    // sing-box (TUN) -> socks 127.0.0.1:порт -> xray -> сервер.
+
+    /** Исходящее соединение для Xray; addr подменяет адрес сервера уже найденным IP. */
+    fun xrayOutbound(link: String, addr: String? = null): JSONObject {
+        val u = parseVless(link) ?: throw NyxarException("Неверная ссылка vless://")
+        if (u.uuid.isEmpty()) throw NyxarException("В ссылке нет UUID")
+        val q = u.params
+        fun g(k: String) = q[k] ?: ""
+
+        val user = jo("id" to u.uuid, "encryption" to g("encryption").ifEmpty { "none" })
+        if (g("flow").isNotEmpty()) user.put("flow", g("flow"))
+
+        val sni = g("sni").ifEmpty { g("host").ifEmpty { u.host } }
+        val fp = g("fp").ifEmpty { "chrome" }
+        val path = g("path").ifEmpty { "/" }
+        val hostHdr = g("host").ifEmpty { u.host }
+
+        val net = when (val t = g("type")) {
+            "", "tcp" -> "tcp"
+            "ws" -> "ws"
+            "grpc" -> "grpc"
+            "httpupgrade" -> "httpupgrade"
+            "xhttp", "splithttp" -> "xhttp"
+            else -> throw NyxarException("Транспорт $t не поддерживается")
+        }
+        if (net == "tcp" && g("headerType") == "http") {
+            throw NyxarException("Транспорт tcp с http-обфускацией не поддерживается")
+        }
+
+        val ss = jo("network" to net)
+        when (val sec = g("security")) {
+            "reality" -> {
+                ss.put("security", "reality")
+                ss.put(
+                    "realitySettings",
+                    jo(
+                        "serverName" to sni,
+                        "fingerprint" to fp,
+                        "publicKey" to g("pbk"),
+                        "shortId" to g("sid"),
+                        "spiderX" to g("spx"),
+                    ),
+                )
+            }
+            "tls" -> {
+                ss.put("security", "tls")
+                val tls = jo("serverName" to sni, "fingerprint" to fp)
+                if (g("alpn").isNotEmpty()) tls.put("alpn", ja(g("alpn").split(',')))
+                if (g("allowInsecure") in listOf("1", "true") || g("insecure") in listOf("1", "true")) {
+                    tls.put("allowInsecure", true)
+                }
+                ss.put("tlsSettings", tls)
+            }
+            "", "none" -> ss.put("security", "none")
+            else -> throw NyxarException("Защита $sec не поддерживается")
+        }
+
+        when (net) {
+            "ws" -> ss.put("wsSettings", jo("path" to path, "host" to hostHdr))
+            "grpc" -> ss.put(
+                "grpcSettings",
+                jo("serviceName" to g("serviceName"), "multiMode" to (g("mode") == "multi")),
+            )
+            "httpupgrade" -> ss.put("httpupgradeSettings", jo("path" to path, "host" to hostHdr))
+            "xhttp" -> {
+                val x = jo("path" to path, "host" to hostHdr, "mode" to g("mode").ifEmpty { "auto" })
+                if (g("extra").isNotEmpty()) {
+                    runCatching { JSONObject(g("extra")) }.getOrNull()?.let { x.put("extra", it) }
+                }
+                ss.put("xhttpSettings", x)
+            }
+        }
+
+        return jo(
+            "tag" to "proxy",
+            "protocol" to "vless",
+            "settings" to jo(
+                "vnext" to ja(
+                    listOf(
+                        jo(
+                            "address" to (addr ?: u.host),
+                            "port" to u.port,
+                            "users" to ja(listOf(user)),
+                        ),
+                    ),
+                ),
+            ),
+            "streamSettings" to ss,
+        )
+    }
+
+    /** null, если ссылку тянет sing-box или Xray; иначе причина отказа. */
+    fun linkError(link: String): String? {
+        if (runCatching { vlessOutbound(link) }.isSuccess) return null
+        return runCatching { xrayOutbound(link) }.exceptionOrNull()?.message ?: "ошибка"
+    }
+
+    fun needsXray(link: String): Boolean =
+        runCatching { vlessOutbound(link) }.isFailure && runCatching { xrayOutbound(link) }.isSuccess
+
+    fun xrayConfig(outbound: JSONObject, port: Int, verbose: Boolean): JSONObject = jo(
+        "log" to jo("loglevel" to (if (verbose) "info" else "warning")),
+        "inbounds" to ja(
+            listOf(
+                jo(
+                    "tag" to "socks-in",
+                    "listen" to "127.0.0.1",
+                    "port" to port,
+                    "protocol" to "socks",
+                    "settings" to jo("auth" to "noauth", "udp" to true, "ip" to "127.0.0.1"),
+                ),
+            ),
+        ),
+        "outbounds" to ja(listOf(outbound, jo("tag" to "direct", "protocol" to "freedom"))),
+    )
+
+    private fun resolveServer(host: String): String {
+        val all = try {
+            java.net.InetAddress.getAllByName(host)
+        } catch (e: java.io.IOException) {
+            throw NyxarException("Не удалось определить адрес сервера $host: ${e.message}")
+        }
+        val pick = all.firstOrNull { it is java.net.Inet4Address } ?: all.first()
+        return pick.hostAddress?.substringBefore('%') ?: throw NyxarException("Не удалось определить адрес $host")
+    }
+
+    private fun freePort(): Int =
+        java.net.ServerSocket(0, 0, java.net.InetAddress.getByName("127.0.0.1")).use { it.localPort }
+
     fun buildConfig(outbound: JSONObject, bypassRu: Boolean, verbose: Boolean, logPath: String): JSONObject {
         val dnsRules = ArrayList<Any?>()
         val routeRules = arrayListOf<Any?>(
@@ -422,6 +559,16 @@ object Engine {
         val known = prefs.server != "auto" && servers.any { it.key == prefs.server }
         if (!known) pingAll(servers)
         val srv = pickServer(servers, prefs.server) ?: throw NyxarException("Нет доступных серверов")
+        if (needsXray(srv.link)) {
+            val host = parseVless(srv.link)?.host ?: throw NyxarException("Неверная ссылка vless://")
+            val port = freePort()
+            val xcfg = xrayConfig(xrayOutbound(srv.link, resolveServer(host)), port, prefs.verbose)
+            val socks = jo(
+                "type" to "socks", "tag" to "proxy",
+                "server" to "127.0.0.1", "server_port" to port, "version" to "5",
+            )
+            return Prepared(srv, buildConfig(socks, prefs.bypassRu, prefs.verbose, logPath), xcfg, port)
+        }
         val cfg = buildConfig(vlessOutbound(srv.link), prefs.bypassRu, prefs.verbose, logPath)
         return Prepared(srv, cfg)
     }

@@ -34,7 +34,7 @@
 | `Nyxar-Setup-X.Y.Z.exe` | установщик: ярлык в меню «Пуск», удаление через «Приложения» |
 | `nyxar.exe` | один файл без установки, можно носить с собой |
 
-Ядро `sing-box` и драйвер `wintun` вшиты внутрь, при первом запуске они распаковываются в `%LOCALAPPDATA%\Nyxar`.
+Ядро `sing-box`, `Xray-core` (для серверов xhttp) и драйвер `wintun` вшиты внутрь, при первом запуске они распаковываются в `%LOCALAPPDATA%\Nyxar`.
 
 ### Android
 
@@ -74,7 +74,7 @@ build_and_run.bat
 cargo build --release
 ```
 
-Готовый файл: `target\release\nyxar.exe`. Положи рядом `sing-box.exe` и `wintun.dll`.
+Готовый файл: `target\release\nyxar.exe`. Положи рядом `sing-box.exe`, `wintun.dll` и (для серверов xhttp) `xray.exe`.
 
 ### Android
 

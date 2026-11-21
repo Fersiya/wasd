@@ -52,7 +52,11 @@ android {
     }
 
     packaging {
-        jniLibs { useLegacyPackaging = true }
+        jniLibs {
+            useLegacyPackaging = true
+            // libxray.so это Go-программа, её нельзя обрабатывать как обычную библиотеку
+            keepDebugSymbols += "**/libxray.so"
+        }
     }
 
     compileOptions {

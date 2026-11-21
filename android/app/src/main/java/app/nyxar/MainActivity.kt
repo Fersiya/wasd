@@ -363,11 +363,17 @@ class MainActivity : Activity() {
     }
 
     private fun showLog() {
-        val f = NyxarVpnService.logFile(this)
-        val raw = if (f.exists()) f.readText() else ""
-        val clean = raw.replace(Regex("\u001B\\[[0-9;]*[A-Za-z]"), "")
-        val tail = clean.lines().filter { it.isNotBlank() }.takeLast(60).joinToString("\n")
-        logBox.text = tail.ifEmpty { "Лог пуст" }
+        fun tail(f: java.io.File, n: Int): String {
+            val raw = if (f.exists()) f.readText() else ""
+            val clean = raw.replace(Regex("\u001B\\[[0-9;]*[A-Za-z]"), "")
+            return clean.lines().filter { it.isNotBlank() }.takeLast(n).joinToString("\n")
+        }
+        val core = tail(NyxarVpnService.logFile(this), 50)
+        val xray = tail(NyxarVpnService.xrayLogFile(this), 25)
+        logBox.text = listOf(core, if (xray.isEmpty()) "" else "── xray ──\n$xray")
+            .filter { it.isNotEmpty() }
+            .joinToString("\n")
+            .ifEmpty { "Лог пуст" }
     }
 
     // ───────────────────────── действия ─────────────────────────

@@ -42,6 +42,14 @@ jobs:
           Expand-Archive wintun.zip -DestinationPath wintun_tmp -Force
           Copy-Item wintun_tmp\wintun\bin\amd64\wintun.dll core\wintun.dll
 
+          # Xray-core: нужен для серверов xhttp и VLESS encryption, которые sing-box не умеет
+          $xr = Invoke-RestMethod https://api.github.com/repos/XTLS/Xray-core/releases/latest
+          $xa = $xr.assets | Where-Object { $_.name -eq 'Xray-windows-64.zip' } | Select-Object -First 1
+          Write-Host "xray:" $xr.tag_name
+          Invoke-WebRequest $xa.browser_download_url -OutFile xray.zip
+          Expand-Archive xray.zip -DestinationPath xray_tmp -Force
+          Copy-Item xray_tmp\xray.exe core\xray.exe
+
           foreach ($f in Get-ChildItem core -File) {
             $in = [IO.File]::OpenRead($f.FullName)
             $out = [IO.File]::Create("assets\$($f.Name).gz")
@@ -148,6 +156,22 @@ jobs:
           go run ./cmd/internal/build_libbox -target android -platform android/arm64
           cp libbox.aar ../libbox.aar
 
+      # Xray-core для xhttp: кладётся как libxray.so и запускается из nativeLibraryDir
+      - name: Fetch Xray-core
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          rel="$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/repos/XTLS/Xray-core/releases/latest)"
+          echo "xray: $(echo "$rel" | jq -r .tag_name)"
+          url="$(echo "$rel" | jq -r '.assets[] | select(.name=="Xray-android-arm64-v8a.zip") | .browser_download_url')"
+          curl -fsSL "$url" -o xray.zip
+          unzip -o xray.zip xray -d xray_tmp
+          mkdir -p android/app/src/main/jniLibs/arm64-v8a
+          cp xray_tmp/xray android/app/src/main/jniLibs/arm64-v8a/libxray.so
+          chmod 755 android/app/src/main/jniLibs/arm64-v8a/libxray.so
+          ls -l android/app/src/main/jniLibs/arm64-v8a
+
       - name: Put libbox into the app
         run: |
           ls -l libbox.aar
@@ -239,7 +263,7 @@ jobs:
           - \`Nyxar-Setup-$VERSION.exe\`: установщик (ярлык в меню «Пуск», удаление через «Приложения»)
           - \`nyxar.exe\`: один файл без установки, запускать от администратора
 
-          Ядро sing-box и драйвер wintun уже внутри. При первом запуске они распаковываются в \`%LOCALAPPDATA%\\Nyxar\`.
+          Ядро sing-box, Xray-core (для серверов xhttp) и драйвер wintun уже внутри. При первом запуске они распаковываются в \`%LOCALAPPDATA%\\Nyxar\`.
 
           **Android** (7.0+, arm64)
           - \`Nyxar-$VERSION.apk\`: установить, разрешить установку из неизвестных источников, вставить ссылку подписки.

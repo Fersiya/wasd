@@ -106,6 +106,7 @@ const CORE_FILES: &[(&str, &[u8])] = &[
     ("sing-box.exe", include_bytes!("../assets/sing-box.exe.gz")),
     ("wintun.dll", include_bytes!("../assets/wintun.dll.gz")),
     ("libcronet.dll", include_bytes!("../assets/libcronet.dll.gz")),
+    ("xray.exe", include_bytes!("../assets/xray.exe.gz")),
 ];
 
 /// Распаковывает вшитое ядро в <data>/core (один раз на версию программы).
@@ -355,7 +356,7 @@ pub fn load_servers(src: &str) -> Result<Vec<Server>, String> {
     for s in fetch_links(src)?.iter().filter_map(|l| parse_server(l)) {
         if is_dummy(&s) {
             dummy += 1;
-        } else if let Err(why) = vless_outbound(&s.link) {
+        } else if let Err(why) = link_supported(&s.link) {
             let why = why.to_string();
             match reasons.iter_mut().find(|(r, _)| *r == why) {
                 Some(e) => e.1 += 1,
@@ -528,6 +529,281 @@ pub fn vless_outbound(link: &str) -> Result<Value, String> {
     Ok(out)
 }
 
+// ───────────────────────── Xray (xhttp и др.) ─────────────────────────
+// sing-box не умеет xhttp и VLESS encryption. Такие серверы обслуживает Xray-core:
+// sing-box (TUN) -> socks 127.0.0.1:порт -> xray -> сервер.
+
+struct VlessLink {
+    host: String,
+    port: u16,
+    uuid: String,
+    q: HashMap<String, String>,
+}
+
+fn parse_vless(link: &str) -> Result<VlessLink, String> {
+    let u = Url::parse(link.trim()).map_err(|e| format!("Неверная ссылка: {e}"))?;
+    if u.scheme() != "vless" {
+        return Err("Нужна ссылка vless://".into());
+    }
+    let host = u
+        .host_str()
+        .ok_or("В ссылке нет адреса сервера")?
+        .trim_matches(|c| c == '[' || c == ']')
+        .to_string();
+    let uuid = percent_decode_str(u.username()).decode_utf8_lossy().to_string();
+    if uuid.is_empty() {
+        return Err("В ссылке нет UUID".into());
+    }
+    Ok(VlessLink {
+        host,
+        port: u.port().unwrap_or(443),
+        uuid,
+        q: u.query_pairs().into_owned().collect(),
+    })
+}
+
+/// Исходящее соединение для Xray. `addr` подменяет адрес сервера (уже найденный IP), чтобы
+/// xray не обращался к DNS через собственный туннель; SNI и Host остаются доменом.
+pub fn xray_outbound(link: &str, addr: Option<&str>) -> Result<Value, String> {
+    let v = parse_vless(link)?;
+    let g = |k: &str| v.q.get(k).map(|s| s.as_str()).unwrap_or("");
+
+    let enc = if g("encryption").is_empty() { "none" } else { g("encryption") };
+    let mut user = json!({ "id": v.uuid, "encryption": enc });
+    if !g("flow").is_empty() {
+        user["flow"] = json!(g("flow"));
+    }
+
+    let sni = if !g("sni").is_empty() {
+        g("sni").to_string()
+    } else if !g("host").is_empty() {
+        g("host").to_string()
+    } else {
+        v.host.clone()
+    };
+    let fp = if g("fp").is_empty() { "chrome" } else { g("fp") };
+    let path = if g("path").is_empty() { "/" } else { g("path") };
+    let host_hdr = if g("host").is_empty() { v.host.clone() } else { g("host").to_string() };
+
+    let net = match g("type") {
+        "" | "tcp" => "tcp",
+        "ws" => "ws",
+        "grpc" => "grpc",
+        "httpupgrade" => "httpupgrade",
+        "xhttp" | "splithttp" => "xhttp",
+        other => return Err(format!("Транспорт {other} не поддерживается")),
+    };
+    if net == "tcp" && g("headerType") == "http" {
+        return Err("Транспорт tcp с http-обфускацией не поддерживается".into());
+    }
+
+    let mut ss = json!({ "network": net });
+    match g("security") {
+        "reality" => {
+            ss["security"] = json!("reality");
+            ss["realitySettings"] = json!({
+                "serverName": sni,
+                "fingerprint": fp,
+                "publicKey": g("pbk"),
+                "shortId": g("sid"),
+                "spiderX": g("spx"),
+            });
+        }
+        "tls" => {
+            ss["security"] = json!("tls");
+            let mut tls = json!({ "serverName": sni, "fingerprint": fp });
+            if !g("alpn").is_empty() {
+                tls["alpn"] = json!(g("alpn").split(',').collect::<Vec<_>>());
+            }
+            if matches!(g("allowInsecure"), "1" | "true") || matches!(g("insecure"), "1" | "true") {
+                tls["allowInsecure"] = json!(true);
+            }
+            ss["tlsSettings"] = tls;
+        }
+        "" | "none" => ss["security"] = json!("none"),
+        other => return Err(format!("Защита {other} не поддерживается")),
+    }
+
+    match net {
+        "ws" => ss["wsSettings"] = json!({ "path": path, "host": host_hdr }),
+        "grpc" => {
+            ss["grpcSettings"] =
+                json!({ "serviceName": g("serviceName"), "multiMode": g("mode") == "multi" });
+        }
+        "httpupgrade" => ss["httpupgradeSettings"] = json!({ "path": path, "host": host_hdr }),
+        "xhttp" => {
+            let mode = if g("mode").is_empty() { "auto" } else { g("mode") };
+            let mut x = json!({ "path": path, "host": host_hdr, "mode": mode });
+            if let Ok(extra @ Value::Object(_)) = serde_json::from_str::<Value>(g("extra")) {
+                x["extra"] = extra;
+            }
+            ss["xhttpSettings"] = x;
+        }
+        _ => {}
+    }
+
+    Ok(json!({
+        "tag": "proxy",
+        "protocol": "vless",
+        "settings": { "vnext": [{
+            "address": addr.unwrap_or(&v.host),
+            "port": v.port,
+            "users": [user],
+        }]},
+        "streamSettings": ss,
+    }))
+}
+
+/// Подходит ли ссылка хотя бы одному из ядер (sing-box напрямую или через Xray).
+pub fn link_supported(link: &str) -> Result<(), String> {
+    if vless_outbound(link).is_ok() {
+        return Ok(());
+    }
+    xray_outbound(link, None).map(|_| ())
+}
+
+/// Нужен ли для ссылки Xray (sing-box её не потянет).
+pub fn needs_xray(link: &str) -> bool {
+    vless_outbound(link).is_err() && xray_outbound(link, None).is_ok()
+}
+
+pub fn xray_config(outbound: Value, port: u16, verbose: bool) -> Value {
+    json!({
+        "log": { "loglevel": if verbose { "info" } else { "warning" } },
+        "inbounds": [{
+            "tag": "socks-in",
+            "listen": "127.0.0.1",
+            "port": port,
+            "protocol": "socks",
+            "settings": { "auth": "noauth", "udp": true, "ip": "127.0.0.1" }
+        }],
+        "outbounds": [outbound, { "tag": "direct", "protocol": "freedom" }]
+    })
+}
+
+/// Что добавить к конфигу sing-box, когда сервер работает через Xray.
+pub struct Sidecar {
+    pub xray_cfg: Value,
+    pub outbound: Value,
+    /// Правила маршрута: трафик самого xray к серверу идёт мимо туннеля (иначе петля).
+    pub rules: Vec<Value>,
+}
+
+pub fn sidecar_plan(link: &str, ip: std::net::IpAddr, port: u16, verbose: bool) -> Result<Sidecar, String> {
+    let xray_cfg = xray_config(xray_outbound(link, Some(&ip.to_string()))?, port, verbose);
+    let cidr = match ip {
+        std::net::IpAddr::V4(_) => format!("{ip}/32"),
+        std::net::IpAddr::V6(_) => format!("{ip}/128"),
+    };
+    Ok(Sidecar {
+        xray_cfg,
+        outbound: json!({
+            "type": "socks", "tag": "proxy",
+            "server": "127.0.0.1", "server_port": port, "version": "5"
+        }),
+        rules: vec![
+            json!({ "ip_cidr": [cidr], "action": "route", "outbound": "direct" }),
+            json!({ "process_name": ["xray.exe", "xray"], "action": "route", "outbound": "direct" }),
+        ],
+    })
+}
+
+fn resolve_server(host: &str, port: u16) -> Result<std::net::IpAddr, String> {
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return Ok(ip);
+    }
+    let addrs: Vec<_> = (host, port)
+        .to_socket_addrs()
+        .map_err(|e| format!("Не удалось определить адрес сервера {host}: {e}"))?
+        .collect();
+    addrs
+        .iter()
+        .find(|a| a.is_ipv4())
+        .or_else(|| addrs.first())
+        .map(|a| a.ip())
+        .ok_or_else(|| format!("Не удалось определить адрес сервера {host}"))
+}
+
+fn free_port() -> Result<u16, String> {
+    let l = std::net::TcpListener::bind(("127.0.0.1", 0))
+        .map_err(|e| format!("Нет свободного порта: {e}"))?;
+    l.local_addr().map(|a| a.port()).map_err(|e| e.to_string())
+}
+
+static XRAY: std::sync::Mutex<Option<Child>> = std::sync::Mutex::new(None);
+
+/// Останавливает Xray, если он запущен.
+pub fn stop_sidecar() {
+    let taken = XRAY.lock().ok().and_then(|mut g| g.take());
+    if let Some(mut c) = taken {
+        let _ = c.kill();
+        let _ = c.wait();
+    }
+}
+
+fn log_tail_of(file: &str, max_chars: usize) -> String {
+    let bytes = fs::read(data_dir().join(file)).unwrap_or_default();
+    let text = strip_ansi(&String::from_utf8_lossy(&bytes));
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    let mut out: Vec<&str> = Vec::new();
+    let mut len = 0;
+    for l in lines.iter().rev() {
+        len += l.len() + 1;
+        if len > max_chars && !out.is_empty() {
+            break;
+        }
+        out.push(l.trim());
+    }
+    out.reverse();
+    out.join("\n")
+}
+
+fn start_xray(core_dir: &std::path::Path, cfg: &Value, port: u16) -> Result<(), String> {
+    let exe = core_dir.join(if cfg!(windows) { "xray.exe" } else { "xray" });
+    if !exe.exists() {
+        return Err("Рядом с программой нет xray.exe (нужен для серверов xhttp)".into());
+    }
+    let dir = data_dir();
+    let cfg_path = dir.join("xray.json");
+    fs::write(&cfg_path, serde_json::to_string_pretty(cfg).unwrap_or_default())
+        .map_err(|e| format!("Не записался xray.json: {e}"))?;
+    let log = fs::File::create(dir.join("xray.log")).map_err(|e| format!("Не создался xray.log: {e}"))?;
+    let log_err = log.try_clone().map_err(|e| format!("Не создался xray.log: {e}"))?;
+
+    let mut cmd = Command::new(&exe);
+    cmd.arg("run")
+        .arg("-c")
+        .arg(&cfg_path)
+        .current_dir(core_dir)
+        .stdin(Stdio::null())
+        .stdout(log)
+        .stderr(log_err);
+    hide_window(&mut cmd);
+    let mut child = cmd.spawn().map_err(|e| format!("Не запустился xray: {e}"))?;
+
+    // ждём, пока xray начнёт слушать порт
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        if let Ok(Some(code)) = child.try_wait() {
+            return Err(format!("xray остановился ({code}):\n{}", log_tail_of("xray.log", 700)));
+        }
+        if TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok() {
+            break;
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("xray не запустился за 8 секунд:\n{}", log_tail_of("xray.log", 700)));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    if let Ok(mut g) = XRAY.lock() {
+        *g = Some(child);
+    }
+    Ok(())
+}
+
 pub fn build_config(outbound: Value, bypass_ru: bool, verbose: bool) -> Value {
     let mut dns_rules: Vec<Value> = vec![];
     let mut route_rules: Vec<Value> = vec![
@@ -604,16 +880,32 @@ pub fn start_core(s: &Settings) -> Result<(Child, String, String), String> {
         .ok_or("Нет доступных серверов")?
         .clone();
 
-    let cfg = build_config(vless_outbound(&srv.link)?, s.bypass_ru, s.verbose);
+    stop_sidecar();
+    let cfg = if needs_xray(&srv.link) {
+        let v = parse_vless(&srv.link)?;
+        let ip = resolve_server(&v.host, v.port)?;
+        let port = free_port()?;
+        let plan = sidecar_plan(&srv.link, ip, port, s.verbose)?;
+        start_xray(&core_dir, &plan.xray_cfg, port)?;
+        let mut cfg = build_config(plan.outbound, s.bypass_ru, s.verbose);
+        if let Some(rules) = cfg["route"]["rules"].as_array_mut() {
+            for (i, r) in plan.rules.into_iter().enumerate() {
+                rules.insert(1 + i, r); // сразу после sniff
+            }
+        }
+        cfg
+    } else {
+        build_config(vless_outbound(&srv.link)?, s.bypass_ru, s.verbose)
+    };
     let cfg_path = dir.join("config.json");
     fs::write(&cfg_path, serde_json::to_string_pretty(&cfg).unwrap_or_default())
         .map_err(|e| format!("Не записался config.json: {e}"))?;
 
     let log = fs::File::create(dir.join("sing-box.log"))
-        .map_err(|e| format!("Не создался sing-box.log: {e}"))?;
+        .map_err(|e| { stop_sidecar(); format!("Не создался sing-box.log: {e}") })?;
     let log_err = log
         .try_clone()
-        .map_err(|e| format!("Не создался sing-box.log: {e}"))?;
+        .map_err(|e| { stop_sidecar(); format!("Не создался sing-box.log: {e}") })?;
 
     let mut cmd = Command::new(core);
     cmd.arg("run")
@@ -626,7 +918,7 @@ pub fn start_core(s: &Settings) -> Result<(Child, String, String), String> {
     hide_window(&mut cmd);
     let child = cmd
         .spawn()
-        .map_err(|e| format!("Не запустился sing-box: {e}"))?;
+        .map_err(|e| { stop_sidecar(); format!("Не запустился sing-box: {e}") })?;
     let key = srv.key();
     Ok((child, srv.name, key))
 }
@@ -717,13 +1009,17 @@ mod win {
 
 /// Мягкая остановка: Ctrl+C и ожидание до 4 секунд, потом принудительно.
 pub fn stop_core(child: &mut Option<Child>) {
-    let Some(mut c) = child.take() else { return };
+    let Some(mut c) = child.take() else {
+        stop_sidecar();
+        return;
+    };
     #[cfg(windows)]
     {
         win::send_ctrl_c(c.id());
         let deadline = Instant::now() + Duration::from_secs(4);
         while Instant::now() < deadline {
             if let Ok(Some(_)) = c.try_wait() {
+                stop_sidecar();
                 return;
             }
             std::thread::sleep(Duration::from_millis(100));
@@ -731,6 +1027,7 @@ pub fn stop_core(child: &mut Option<Child>) {
     }
     let _ = c.kill();
     let _ = c.wait();
+    stop_sidecar();
 }
 
 // ───────────────────────── автозапуск ─────────────────────────
@@ -805,6 +1102,47 @@ mod tests {
         assert!(is_dummy(&parse_server(loopback).unwrap()));
         assert!(is_dummy(&parse_server(info).unwrap()));
         assert!(!is_dummy(&parse_server(LINK).unwrap()));
+    }
+
+    #[test]
+    fn xhttp_goes_through_xray() {
+        let l = LINK.replace("type=tcp", "type=xhttp&mode=packet-up&path=%2Fx&extra=%7B%22xPaddingBytes%22%3A%22100-1000%22%7D");
+        assert!(vless_outbound(&l).is_err());
+        assert!(needs_xray(&l));
+        assert!(link_supported(&l).is_ok());
+        let ip: std::net::IpAddr = "203.0.113.7".parse().unwrap();
+        let plan = sidecar_plan(&l, ip, 12345, false).unwrap();
+        let ob = &plan.xray_cfg["outbounds"][0];
+        assert_eq!(ob["streamSettings"]["network"], "xhttp");
+        assert_eq!(ob["streamSettings"]["xhttpSettings"]["mode"], "packet-up");
+        assert_eq!(ob["streamSettings"]["xhttpSettings"]["path"], "/x");
+        assert_eq!(ob["streamSettings"]["xhttpSettings"]["extra"]["xPaddingBytes"], "100-1000");
+        // адрес подменён на IP, SNI и Host остаются доменом
+        assert_eq!(ob["settings"]["vnext"][0]["address"], "203.0.113.7");
+        assert_eq!(ob["streamSettings"]["xhttpSettings"]["host"], "example.org");
+        assert_eq!(plan.xray_cfg["inbounds"][0]["port"], 12345);
+        assert_eq!(plan.outbound["type"], "socks");
+        assert_eq!(plan.outbound["server_port"], 12345);
+        assert_eq!(plan.rules[0]["ip_cidr"][0], "203.0.113.7/32");
+        // обычные ссылки Xray не нужны
+        assert!(!needs_xray(LINK));
+    }
+
+    #[test]
+    fn vless_encryption_goes_through_xray() {
+        let l = LINK.replace("&type=tcp", "&type=tcp&encryption=mlkem768x25519plus.native.0rtt.abc");
+        assert!(needs_xray(&l));
+        let ob = xray_outbound(&l, None).unwrap();
+        assert_eq!(
+            ob["settings"]["vnext"][0]["users"][0]["encryption"],
+            "mlkem768x25519plus.native.0rtt.abc"
+        );
+    }
+
+    #[test]
+    fn unknown_transport_unsupported_by_both() {
+        let l = LINK.replace("type=tcp", "type=kcp");
+        assert!(link_supported(&l).is_err());
     }
 
     #[test]

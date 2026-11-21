@@ -50,12 +50,15 @@ class NyxarVpnService : VpnService(), PlatformInterface, CommandServerHandler {
         private const val TAG = "Nyxar"
 
         fun logFile(ctx: Context) = File(ctx.filesDir, "sing-box.log")
+
+        fun xrayLogFile(ctx: Context) = File(ctx.filesDir, "xray.log")
     }
 
     private val worker = Executors.newSingleThreadExecutor()
     private var commandServer: CommandServer? = null
     private var tun: ParcelFileDescriptor? = null
     private var watcher: NetworkWatcher? = null
+    private var xray: Process? = null
 
     // ───────────────────────── жизненный цикл ─────────────────────────
 
@@ -100,6 +103,7 @@ class NyxarVpnService : VpnService(), PlatformInterface, CommandServerHandler {
             log.writeText("")
             val prepared = Engine.prepare(prefs, log.path)
             NyxarApp.setupLibbox(this)
+            prepared.xrayConfig?.let { startXray(it, prepared.xrayPort) }
 
             val server = CommandServer(this, this)
             server.start()
@@ -128,6 +132,53 @@ class NyxarVpnService : VpnService(), PlatformInterface, CommandServerHandler {
         watcher = null
         runCatching { tun?.close() }
         tun = null
+        stopXray()
+    }
+
+    /**
+     * Запускает Xray из libxray.so (лежит в nativeLibraryDir, оттуда запуск разрешён).
+     * Приложение исключено из VPN (addDisallowedApplication), поэтому трафик xray к серверу идёт мимо туннеля.
+     */
+    private fun startXray(cfg: org.json.JSONObject, port: Int) {
+        val exe = File(applicationInfo.nativeLibraryDir, "libxray.so")
+        if (!exe.exists()) throw NyxarException("В приложении нет Xray (libxray.so), нужен для серверов xhttp")
+        val cfgFile = File(filesDir, "xray.json")
+        cfgFile.writeText(cfg.toString(2))
+        val log = xrayLogFile(this)
+        log.writeText("")
+        val p = ProcessBuilder(exe.path, "run", "-c", cfgFile.path)
+            .directory(filesDir)
+            .redirectErrorStream(true)
+            .redirectOutput(log)
+            .start()
+        xray = p
+
+        // ждём, пока xray начнёт слушать порт
+        val deadline = System.currentTimeMillis() + 8000
+        while (true) {
+            if (!p.isAlive) {
+                val tail = log.readText().lines().filter { it.isNotBlank() }.takeLast(8).joinToString("\n")
+                throw NyxarException("xray остановился (${p.exitValue()}):\n$tail")
+            }
+            try {
+                java.net.Socket().use { it.connect(java.net.InetSocketAddress("127.0.0.1", port), 200) }
+                break
+            } catch (_: java.io.IOException) {
+            }
+            if (System.currentTimeMillis() > deadline) {
+                val tail = log.readText().lines().filter { it.isNotBlank() }.takeLast(8).joinToString("\n")
+                throw NyxarException("xray не запустился за 8 секунд:\n$tail")
+            }
+            Thread.sleep(100)
+        }
+    }
+
+    private fun stopXray() {
+        val p = xray ?: return
+        xray = null
+        p.destroy()
+        runCatching { p.waitFor(2, java.util.concurrent.TimeUnit.SECONDS) }
+        if (p.isAlive) p.destroyForcibly()
     }
 
     // ───────────────────────── уведомление ─────────────────────────
