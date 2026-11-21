@@ -278,9 +278,6 @@ class NyxarVpnService : VpnService(), PlatformInterface, CommandServerHandler {
             box.index = ni.index
             runCatching { box.mtu = ni.mtu }
             box.dnsServer = StringArray(props.dnsServers.mapNotNull { it.hostAddress?.substringBefore('%') })
-            box.dnsSearchDomain = StringArray(
-                props.domains?.split(' ')?.filter { it.isNotEmpty() }.orEmpty(),
-            )
             box.gateway = StringArray(
                 props.routes
                     .filter { it.destination.prefixLength == 0 }
