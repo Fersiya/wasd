@@ -105,6 +105,21 @@
   .quick span { flex: 1; min-width: 0; } .quick small { display: block; color: var(--mute); font-size: 12px; }
   .quick em { font-style: normal; color: var(--mute); font-size: 18px; }
 
+
+  .usage { margin-top: 8px; }
+  .urow { display: flex; justify-content: space-between; color: var(--mute); font-size: 13px; }
+  .urow b { color: var(--text); font-variant-numeric: tabular-nums; }
+  .bar { height: 6px; border-radius: 4px; background: var(--line); margin-top: 8px; overflow: hidden; }
+  .bar i { display: block; height: 100%; width: 0; border-radius: 4px; background: linear-gradient(90deg, var(--a1), var(--a2)); transition: width .5s var(--ease), background .3s; }
+  .bar.hot i { background: var(--warn); }
+  .toprow { display: flex; align-items: center; gap: 10px; padding: 7px 0; border-top: 1px solid var(--line); font-size: 13px; }
+  .toprow:first-child { border-top: 0; }
+  .toprow span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .toprow em { font-style: normal; color: var(--mute); font-variant-numeric: tabular-nums; }
+  .toprow button { border: 1px solid var(--line); background: transparent; color: var(--text); border-radius: 9px; padding: 4px 10px; font: inherit; font-size: 12px; cursor: pointer; }
+  .toprow button:hover { border-color: var(--a1); }
+  .toprow button[disabled] { color: var(--mute); cursor: default; border-color: transparent; }
+
   /* ───── общие элементы ───── */
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; margin-top: 14px; animation: fadeUp .45s var(--ease) both; }
   .hd { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; gap: 8px; }
@@ -278,6 +293,22 @@
         <span class="sw"><input type="checkbox" id="auto_switch"><i></i></span></label>
       <label class="t"><span>Подключаться при запуске</span>
         <span class="sw"><input type="checkbox" id="autoconnect"><i></i></span></label>
+    </section>
+
+    <section class="card">
+      <div class="hd"><h3>Экономия трафика</h3></div>
+      <label class="t"><span>Блокировать рекламу и трекеры<small>рекламные сети и счётчики не загружаются вообще: меньше трафика, страницы быстрее</small></span>
+        <span class="sw"><input type="checkbox" id="saver"><i></i></span></label>
+      <div class="usage">
+        <div class="urow"><span>За этот месяц</span><b id="mbytes">0</b></div>
+        <div class="bar" id="lbar" style="display:none"><i id="lfill"></i></div>
+      </div>
+      <div class="addrow" style="margin-top:10px"><input class="txt" id="limin" inputmode="numeric" placeholder="лимит на месяц, ГБ (пусто — без лимита)" spellcheck="false"><button class="primary" id="limset">Задать</button></div>
+      <div id="topbox" style="display:none">
+        <p class="hint" style="margin-top:12px">Больше всего трафика через VPN ушло у этих программ. Если сайт или приложение работает без VPN, пусти его напрямую одной кнопкой.</p>
+        <div id="toplist"></div>
+      </div>
+      <button class="ghost" id="ureset" style="margin-top:10px">Сбросить счётчик</button>
     </section>
 
     <section class="card">
@@ -496,9 +527,46 @@
   // ───── состояние от программы ─────
   function setStat(id, html, on) { const el = $(id); if (el.innerHTML !== html) el.innerHTML = html; el.parentElement.classList.toggle('dim', !on); }
 
+
+  // ───── экономия трафика ─────
+  function renderSaver(s) {
+    const [v, un] = bytes(s.month_bytes || 0);
+    $('mbytes').textContent = v + ' ' + un;
+    const lim = (s.limit_mb || 0) * 1048576;
+    $('lbar').style.display = lim ? 'block' : 'none';
+    if (lim) {
+      const p = Math.min(100, (s.month_bytes || 0) / lim * 100);
+      $('lfill').style.width = p + '%';
+      $('lbar').classList.toggle('hot', p >= 80);
+    }
+    if (document.activeElement !== $('limin')) $('limin').value = s.limit_mb ? String(+(s.limit_mb / 1024).toFixed(2)) : '';
+    const top = s.top_apps || [];
+    const sig = JSON.stringify(top);
+    $('topbox').style.display = top.length ? 'block' : 'none';
+    if (sig === lastTopSig) return;
+    lastTopSig = sig;
+    $('toplist').innerHTML = '';
+    top.forEach((a) => {
+      const r = document.createElement('div'); r.className = 'toprow';
+      const n = document.createElement('span'); n.textContent = a.name; n.title = a.name;
+      const b = document.createElement('em'); const [x, y] = bytes(a.bytes); b.textContent = x + ' ' + y;
+      const k = document.createElement('button');
+      if (a.bypass || a.name === '—') { k.textContent = a.bypass ? 'мимо VPN' : ''; k.disabled = true; if (!a.bypass) k.style.display = 'none'; }
+      else { k.textContent = 'Мимо VPN'; k.onclick = () => { if (!apps.includes(a.name)) { apps = apps.concat([a.name]); send({ cmd: 'apps', list: apps }); } }; }
+      r.appendChild(n); r.appendChild(b); r.appendChild(k); $('toplist').appendChild(r);
+    });
+  }
+  let lastTopSig = '';
+  $('limset').onclick = () => {
+    const gb = parseFloat(($('limin').value || '').replace(',', '.'));
+    send({ cmd: 'limit', mb: gb > 0 ? Math.round(gb * 1024) : 0 });
+  };
+  $('ureset').onclick = () => send({ cmd: 'usage_reset' });
+
   window.__state = function (s) {
     document.body.className = 'st-' + s.status;
     $('status').textContent = s.status_text;
+    renderSaver(s);
     $('sub').textContent = s.sub;
     $('shield').style.display = s.smart_on ? 'inline-flex' : 'none';
     $('shield').textContent = 'Умное соединение · резерв: ' + Math.max(0, Math.min(s.smart_n, 5) - 1);
@@ -514,7 +582,7 @@
     setStat('v-total', on ? size(s.down + s.up) : '—', on);
     setStat('v-time', on ? dur(s.uptime) : '—', on);
 
-    ['bypass_ru', 'autostart', 'autoconnect', 'auto_update', 'verbose', 'tg_proxy', 'auto_switch', 'smart'].forEach((k) => { $(k).checked = !!s[k]; });
+    ['bypass_ru', 'autostart', 'autoconnect', 'auto_update', 'verbose', 'tg_proxy', 'auto_switch', 'smart', 'saver'].forEach((k) => { $(k).checked = !!s[k]; });
     tgLink = s.tg_link || '';
     $('tgbox').style.display = s.tg_proxy ? 'block' : 'none';
     $('tgerr').style.display = s.tg_error ? 'block' : 'none';
@@ -556,7 +624,7 @@
     try { navigator.clipboard.writeText(t).then(done, fb); } catch (e) { fb(); }
   }
   $('tgcopy').onclick = () => copyText(tgLink, () => { $('tgcopy').textContent = 'Скопировано'; setTimeout(() => { $('tgcopy').textContent = 'Копировать ссылку'; }, 1500); });
-  ['bypass_ru', 'autostart', 'autoconnect', 'auto_update', 'verbose', 'tg_proxy', 'auto_switch', 'smart'].forEach((k) =>
+  ['bypass_ru', 'autostart', 'autoconnect', 'auto_update', 'verbose', 'tg_proxy', 'auto_switch', 'smart', 'saver'].forEach((k) =>
     $(k).onchange = (e) => send({ cmd: 'set', key: k, value: e.target.checked }));
   $('save').onclick = () => { send({ cmd: 'save', link: $('link').value.trim() }); go('home'); };
   $('updbtn').onclick = () => send({ cmd: 'do_update' });

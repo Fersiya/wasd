@@ -68,6 +68,12 @@ pub struct Settings {
     /// Секрет прокси (hex, 16 байт), создаётся один раз
     #[serde(default)]
     pub tg_secret: String,
+    /// Экономия трафика: блокировать рекламу и трекеры
+    #[serde(default = "d_true")]
+    pub saver: bool,
+    /// Месячный лимит трафика в МБ (0 — без лимита)
+    #[serde(default)]
+    pub limit_mb: u64,
 }
 
 impl Default for Settings {
@@ -84,6 +90,8 @@ impl Default for Settings {
             bypass_apps: Vec::new(),
             tg_proxy: false,
             tg_secret: String::new(),
+            saver: true,
+            limit_mb: 0,
         }
     }
 }
@@ -959,7 +967,61 @@ pub fn apply_extras(cfg: &mut Value, apps: &[String], api_port: u16) {
     }
 }
 
+/// Блокировка рекламы и трекеров: отказ на уровне DNS и сброс соединения в маршрутизации.
+pub fn apply_saver(cfg: &mut Value, on: bool) {
+    if !on {
+        return;
+    }
+    let domains = crate::saver::ADS;
+    if let Some(rules) = cfg["dns"]["rules"].as_array_mut() {
+        rules.insert(0, json!({ "domain_suffix": domains, "action": "reject" }));
+    }
+    if let Some(rules) = cfg["route"]["rules"].as_array_mut() {
+        // после sniff и hijack-dns, до остальных правил
+        let at = 2.min(rules.len());
+        rules.insert(at, json!({ "domain_suffix": domains, "action": "reject" }));
+    }
+}
+
+/// Снимок статистики ядра: общий счётчик и список соединений.
+pub struct Snapshot {
+    pub up: u64,
+    pub down: u64,
+    pub conns: Vec<crate::saver::Conn>,
+}
+
+pub fn parse_snapshot(body: &str) -> Option<Snapshot> {
+    let v: Value = serde_json::from_str(body).ok()?;
+    let conns = v["connections"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|c| {
+                    Some(crate::saver::Conn {
+                        id: c["id"].as_str()?.to_string(),
+                        process: c["metadata"]["processPath"].as_str().unwrap_or("").to_string(),
+                        up: c["upload"].as_u64().unwrap_or(0),
+                        down: c["download"].as_u64().unwrap_or(0),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(Snapshot { up: v["uploadTotal"].as_u64()?, down: v["downloadTotal"].as_u64()?, conns })
+}
+
+pub fn snapshot() -> Option<Snapshot> {
+    let port = API_PORT.load(Ordering::Relaxed);
+    if port == 0 {
+        return None;
+    }
+    let agent = ureq::AgentBuilder::new().timeout(Duration::from_millis(1500)).build();
+    let body = agent.get(&format!("http://127.0.0.1:{port}/connections")).call().ok()?.into_string().ok()?;
+    parse_snapshot(&body)
+}
+
 /// Сколько байт отправлено и получено за текущее подключение.
+#[allow(dead_code)]
 pub fn traffic() -> Option<(u64, u64)> {
     let port = API_PORT.load(Ordering::Relaxed);
     if port == 0 {
@@ -1285,6 +1347,7 @@ fn launch_core(core: &std::path::Path, core_dir: &std::path::Path, dir: &std::pa
     let api = free_port().unwrap_or(0);
     API_PORT.store(api, Ordering::Relaxed);
     apply_extras(&mut cfg, &s.bypass_apps, api);
+    apply_saver(&mut cfg, s.saver);
     let cfg_path = dir.join("config.json");
     fs::write(&cfg_path, serde_json::to_string_pretty(&cfg).unwrap_or_default())
         .map_err(|e| format!("Не записался config.json: {e}"))?;
@@ -1812,5 +1875,31 @@ mod tests {
         assert_eq!(s.server, "auto");
         assert!(s.bypass_ru);
         assert!(!s.autoconnect);
+    }
+
+    #[test]
+    fn saver_adds_reject_rules() {
+        let mut cfg = build_config(json!({"type":"direct","tag":"proxy"}), true, false);
+        apply_saver(&mut cfg, true);
+        let d = cfg["dns"]["rules"].as_array().unwrap();
+        assert_eq!(d[0]["action"], "reject");
+        let r = cfg["route"]["rules"].as_array().unwrap();
+        assert_eq!(r[0]["action"], "sniff");
+        assert_eq!(r[2]["action"], "reject");
+        let mut off = build_config(json!({"type":"direct","tag":"proxy"}), true, false);
+        apply_saver(&mut off, false);
+        assert!(off["route"]["rules"].as_array().unwrap().iter().all(|x| x["action"] != "reject"));
+    }
+
+    #[test]
+    fn snapshot_parses_connections() {
+        let body = r#"{"downloadTotal":900,"uploadTotal":100,"connections":[
+            {"id":"a","upload":10,"download":90,"metadata":{"processPath":"C:\\x\\chrome.exe"}},
+            {"id":"b","upload":1,"download":2,"metadata":{}}]}"#;
+        let s = parse_snapshot(body).unwrap();
+        assert_eq!((s.up, s.down), (100, 900));
+        assert_eq!(s.conns.len(), 2);
+        assert_eq!(s.conns[0].process, "C:\\x\\chrome.exe");
+        assert_eq!(s.conns[1].process, "");
     }
 }

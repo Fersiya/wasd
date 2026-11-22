@@ -2,6 +2,7 @@
 
 mod engine;
 mod probe;
+mod saver;
 mod tgproxy;
 mod update;
 
@@ -42,7 +43,7 @@ enum UserEvent {
     Ui(String),
     Show,
     /// Сколько байт отправлено и получено за подключение
-    Traffic(Option<(u64, u64)>, Option<String>),
+    Traffic(Option<(u64, u64)>, Option<String>, Option<Vec<saver::Conn>>),
     /// Есть ли выход в интернет через туннель
     Health(bool),
     /// Список программ для выбора: JSON-массив или текст ошибки
@@ -117,6 +118,8 @@ struct App {
     health_busy: Arc<AtomicBool>,
     tick: u32,
     pending_autoconnect: bool,
+    /// Трафик за месяц и по программам
+    usage: saver::Usage,
 }
 
 impl App {
@@ -154,6 +157,15 @@ impl App {
             "smart_on": self.st == St::On && self.server_key == engine::SMART_KEY,
             "smart_n": engine::smart_candidates(&self.servers).len(),
             "bypass_apps": self.settings.bypass_apps,
+            "saver": self.settings.saver,
+            "limit_mb": self.settings.limit_mb,
+            "month_bytes": self.usage.total,
+            "top_apps": self.usage.top(8).into_iter()
+                .map(|(name, bytes)| {
+                    let bypass = self.settings.bypass_apps.iter().any(|a| a.eq_ignore_ascii_case(&name));
+                    json!({ "name": name, "bytes": bytes, "bypass": bypass })
+                })
+                .collect::<Vec<_>>(),
             "up": self.traffic.0,
             "down": self.traffic.1,
             "up_speed": self.speed.0,
@@ -383,6 +395,7 @@ fn restart(proxy: &EventLoopProxy<UserEvent>, app: &mut App) {
 
 fn toggle_connection(proxy: &EventLoopProxy<UserEvent>, app: &mut App) {
     if app.child.is_some() {
+        app.usage.save(&engine::data_dir());
         engine::stop_core(&mut app.child);
         app.st = St::Off;
         app.override_key = None;
@@ -524,6 +537,7 @@ fn main() {
         health_busy: Arc::new(AtomicBool::new(false)),
         tick: 0,
         pending_autoconnect: false,
+        usage: saver::Usage::load(&engine::data_dir()),
     };
     let mut win: Option<Win> = None;
     let mut next_poll = Instant::now() + Duration::from_secs(2);
@@ -556,7 +570,10 @@ fn main() {
                 if !app.stats_busy.swap(true, Ordering::Relaxed) {
                     let (p, busy) = (proxy.clone(), app.stats_busy.clone());
                     std::thread::spawn(move || {
-                        let _ = p.send_event(UserEvent::Traffic(engine::traffic(), engine::active_key()));
+                        let snap = engine::snapshot();
+                        let totals = snap.as_ref().map(|x| (x.up, x.down));
+                        let conns = snap.map(|x| x.conns);
+                        let _ = p.send_event(UserEvent::Traffic(totals, engine::active_key(), conns));
                         busy.store(false, Ordering::Relaxed);
                     });
                 }
@@ -597,7 +614,7 @@ fn main() {
                 sync(&app, &tray, &status_item, &toggle_item, &win);
             }
 
-            Event::UserEvent(UserEvent::Traffic(t, active)) => {
+            Event::UserEvent(UserEvent::Traffic(t, active, conns)) => {
                 // умное соединение: показываем, какой сервер сейчас работает, и сообщаем о переходах
                 if app.st == St::On && app.server_key == engine::SMART_KEY {
                     if let Some(k) = active {
@@ -612,6 +629,24 @@ fn main() {
                                 sync(&app, &tray, &status_item, &toggle_item, &win);
                             }
                         }
+                    }
+                }
+                if let (Some(conns), true) = (conns, app.st == St::On) {
+                    let before = app.usage.total;
+                    app.usage.feed(&saver::now_month(), &conns);
+                    if let Some(level) = app.usage.check_limit(app.settings.limit_mb) {
+                        notify(
+                            APP,
+                            if level >= 2 {
+                                "Месячный лимит трафика исчерпан"
+                            } else {
+                                "Израсходовано больше 80% месячного лимита"
+                            },
+                        );
+                    }
+                    // на диск пишем не чаще, чем раз в ~30 секунд
+                    if app.tick % 15 == 0 && app.usage.total != before {
+                        app.usage.save(&engine::data_dir());
                     }
                 }
                 if let (Some((up, down)), true) = (t, app.st == St::On) {
@@ -681,6 +716,7 @@ fn main() {
                     }
                     sync(&app, &tray, &status_item, &toggle_item, &win);
                 } else if e.id == *quit_item.id() {
+                    app.usage.save(&engine::data_dir());
                     engine::stop_core(&mut app.child);
                     win = None;
                     tray = None;
@@ -720,6 +756,13 @@ fn main() {
                             }
                             "verbose" => {
                                 app.settings.verbose = on;
+                                engine::save_settings(&app.settings);
+                                if app.child.is_some() {
+                                    restart(&proxy, &mut app);
+                                }
+                            }
+                            "saver" => {
+                                app.settings.saver = on;
                                 engine::save_settings(&app.settings);
                                 if app.child.is_some() {
                                     restart(&proxy, &mut app);
@@ -765,6 +808,16 @@ fn main() {
                             refresh_servers(&proxy, &mut app);
                             restart(&proxy, &mut app);
                         }
+                    }
+                    "limit" => {
+                        app.settings.limit_mb = v["mb"].as_u64().unwrap_or(0).min(10_000_000);
+                        // новый лимит — новые предупреждения
+                        app.usage.warned = 0;
+                        engine::save_settings(&app.settings);
+                    }
+                    "usage_reset" => {
+                        app.usage.reset();
+                        app.usage.save(&engine::data_dir());
                     }
                     "log" => push_log(&win),
                     "apps" => {
@@ -843,6 +896,7 @@ fn main() {
                         app.traffic = (0, 0);
                         app.speed = (0, 0);
                         app.last_traffic = None;
+                        app.usage.new_session();
                         app.health_fails = 0;
                         notify(APP, &format!("Подключено: {name}"));
                     }
@@ -889,6 +943,7 @@ fn main() {
             Event::UserEvent(UserEvent::UpdateInstalled(result)) => match result {
                 Ok(ver) => {
                     notify(APP, &format!("Обновлено до {ver}, перезапускаюсь…"));
+                    app.usage.save(&engine::data_dir());
                     engine::stop_core(&mut app.child);
                     update::relaunch();
                     win = None;

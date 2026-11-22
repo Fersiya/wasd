@@ -43,6 +43,8 @@ class Prepared(
     /** Конфиг Xray и его локальный порт, если сервер работает через Xray (xhttp и др.). */
     val xrayConfig: JSONObject? = null,
     val xrayPort: Int = 0,
+    /** Порт локального API ядра: по нему считаем трафик. */
+    val apiPort: Int = 0,
 )
 
 object Engine {
@@ -554,7 +556,7 @@ object Engine {
     private fun freePort(): Int =
         java.net.ServerSocket(0, 0, java.net.InetAddress.getByName("127.0.0.1")).use { it.localPort }
 
-    fun buildConfig(outbound: JSONObject, bypassRu: Boolean, verbose: Boolean, logPath: String): JSONObject {
+    fun buildConfig(outbound: JSONObject, bypassRu: Boolean, verbose: Boolean, logPath: String, saver: Boolean = false, apiPort: Int = 0): JSONObject {
         val dnsRules = ArrayList<Any?>()
         val routeRules = arrayListOf<Any?>(
             jo("action" to "sniff"),
@@ -565,7 +567,12 @@ object Engine {
             dnsRules.add(jo("domain_suffix" to ja(RU_DIRECT), "action" to "route", "server" to "local"))
             routeRules.add(jo("domain_suffix" to ja(RU_DIRECT), "action" to "route", "outbound" to "direct"))
         }
-        return jo(
+        if (saver) {
+            // отказ на уровне DNS и сброс соединения: реклама и трекеры не загружаются
+            dnsRules.add(0, jo("domain_suffix" to ja(Saver.ADS), "action" to "reject"))
+            routeRules.add(2, jo("domain_suffix" to ja(Saver.ADS), "action" to "reject"))
+        }
+        val cfg = jo(
             "log" to jo(
                 "level" to (if (verbose) "info" else "warn"),
                 "timestamp" to true,
@@ -600,6 +607,10 @@ object Engine {
                 "rules" to ja(routeRules),
             ),
         )
+        if (apiPort != 0) {
+            cfg.put("experimental", jo("clash_api" to jo("external_controller" to "127.0.0.1:$apiPort")))
+        }
+        return cfg
     }
 
     /** Скачивает подписку, выбирает сервер и собирает конфиг. Блокирующий вызов. */
@@ -608,6 +619,7 @@ object Engine {
         val known = prefs.server != "auto" && servers.any { it.key == prefs.server }
         if (!known) pingAll(servers)
         val srv = pickServer(servers, prefs.server) ?: throw NyxarException("Нет доступных серверов")
+        val api = freePort()
         if (needsXray(srv.link)) {
             val host = parseVless(srv.link)?.host ?: throw NyxarException("Неверная ссылка vless://")
             val port = freePort()
@@ -616,9 +628,9 @@ object Engine {
                 "type" to "socks", "tag" to "proxy",
                 "server" to "127.0.0.1", "server_port" to port, "version" to "5",
             )
-            return Prepared(srv, buildConfig(socks, prefs.bypassRu, prefs.verbose, logPath), xcfg, port)
+            return Prepared(srv, buildConfig(socks, prefs.bypassRu, prefs.verbose, logPath, prefs.saver, api), xcfg, port, api)
         }
-        val cfg = buildConfig(vlessOutbound(srv.link), prefs.bypassRu, prefs.verbose, logPath)
-        return Prepared(srv, cfg)
+        val cfg = buildConfig(vlessOutbound(srv.link), prefs.bypassRu, prefs.verbose, logPath, prefs.saver, api)
+        return Prepared(srv, cfg, apiPort = api)
     }
 }

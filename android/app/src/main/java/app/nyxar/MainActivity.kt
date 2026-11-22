@@ -65,6 +65,13 @@ class MainActivity : Activity() {
     private lateinit var appsText: TextView
     private lateinit var tileServer: TextView
     private lateinit var tileTime: TextView
+    private lateinit var usageTotal: TextView
+    private lateinit var limitTrack: LinearLayout
+    private lateinit var limitFill: View
+    private lateinit var limitRest: View
+    private lateinit var limitInput: EditText
+    private lateinit var topBox: LinearLayout
+    private var topSig = ""
     private var tab = 0
     private var listSig = ""
 
@@ -302,6 +309,61 @@ class MainActivity : Activity() {
             ),
         )
 
+        // экономия трафика
+        usageTotal = text("0 Б", 15f, TEXT, true)
+        limitFill = View(this).apply { background = rounded(ACCENT, 4) }
+        limitRest = View(this)
+        limitTrack = LinearLayout(this).apply {
+            weightSum = 100f
+            background = rounded(CARD_LINE, 4)
+            visibility = View.GONE
+            layoutParams = lp(8).apply { height = dp(6) }
+            addView(limitFill, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 0f))
+            addView(limitRest, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 100f))
+        }
+        limitInput = EditText(this).apply {
+            hint = "лимит на месяц, ГБ (пусто — без лимита)"
+            setHintTextColor(MUTED)
+            setTextColor(TEXT)
+            textSize = 13f
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+            maxLines = 1
+            background = rounded(BG, 12, CARD_LINE, 1)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            layoutParams = lp(10)
+            if (prefs.limitMb > 0) setText((prefs.limitMb / 1024.0).toString().removeSuffix(".0"))
+        }
+        topBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val usageRow = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        usageRow.addView(text("За этот месяц", 13f, MUTED), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        usageRow.addView(usageTotal)
+        pageSettings.addView(section("Экономия трафика"))
+        pageSettings.addView(
+            card(
+                toggle("Блокировать рекламу и трекеры", "рекламные сети и счётчики не загружаются: меньше трафика, быстрее страницы", prefs.saver) {
+                    prefs.saver = it
+                    restartIfActive()
+                },
+                divider(),
+                usageRow,
+                limitTrack,
+                limitInput,
+                button("Задать лимит") {
+                    val gb = limitInput.text.toString().replace(',', '.').toDoubleOrNull() ?: 0.0
+                    prefs.limitMb = if (gb > 0) Math.round(gb * 1024) else 0L
+                    runCatching {
+                        val t = UsageTracker(prefs)
+                        t.warned = 0
+                        t.save()
+                    }
+                    renderUsage()
+                },
+                topBox,
+                ghostButton("Сбросить счётчик") { UsageTracker(prefs).reset(); topSig = ""; renderUsage() }
+                    .apply { layoutParams = lp(10).apply { height = dp(42) } },
+            ),
+        )
+
         appsText = text("", 13f, MUTED).apply { setPadding(0, dp(2), 0, 0) }
         pageSettings.addView(section("Программы мимо VPN"))
         pageSettings.addView(
@@ -417,7 +479,77 @@ class MainActivity : Activity() {
 
     // ───────────────────────── отрисовка ─────────────────────────
 
+    private fun fmtBytes(n: Long): String {
+        if (n < 1024) return "$n Б"
+        val u = arrayOf("КБ", "МБ", "ГБ", "ТБ")
+        var v = n.toDouble()
+        var i = -1
+        do { v /= 1024; i++ } while (v >= 1024 && i < 3)
+        return (if (v >= 100) "%.0f".format(v) else "%.1f".format(v)) + " " + u[i]
+    }
+
+    private fun appLabel(pkg: String): String =
+        try { packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString() } catch (_: Exception) { pkg }
+
+    private fun renderUsage() {
+        val u = UsageTracker(prefs)
+        usageTotal.text = fmtBytes(u.total)
+        val limit = prefs.limitMb * 1024 * 1024
+        limitTrack.visibility = if (limit > 0) View.VISIBLE else View.GONE
+        if (limit > 0) {
+            val p = minOf(100f, u.total * 100f / limit)
+            (limitFill.layoutParams as LinearLayout.LayoutParams).weight = p
+            (limitRest.layoutParams as LinearLayout.LayoutParams).weight = 100f - p
+            limitFill.background = rounded(if (p >= 80) ORANGE else ACCENT, 4)
+            limitTrack.requestLayout()
+        }
+        val top = u.top(8)
+        val sig = top.toString() + prefs.bypassApps
+        if (sig == topSig) return
+        topSig = sig
+        topBox.removeAllViews()
+        if (top.isEmpty()) {
+            topBox.visibility = View.GONE
+            return
+        }
+        topBox.visibility = View.VISIBLE
+        topBox.addView(
+            text("Больше всего трафика через VPN ушло у этих программ. Если приложение работает и без VPN, пусти его напрямую.", 12f, MUTED)
+                .apply { setPadding(0, dp(14), 0, dp(4)) },
+        )
+        top.forEach { (pkg, bytes) ->
+            val row = LinearLayout(this).apply {
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, dp(6), 0, dp(6))
+            }
+            row.addView(
+                text(appLabel(pkg), 13f).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END },
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+            )
+            row.addView(text(fmtBytes(bytes), 12f, MUTED).apply { setPadding(dp(8), 0, dp(8), 0) })
+            val canBypass = pkg != "—" && pkg != packageName
+            if (canBypass) {
+                val already = pkg in prefs.bypassApps
+                row.addView(
+                    text(if (already) "мимо VPN" else "Мимо VPN", 12f, if (already) MUTED else ACCENT, !already).apply {
+                        background = rounded(Color.TRANSPARENT, 9, CARD_LINE, 1)
+                        setPadding(dp(10), dp(4), dp(10), dp(4))
+                        if (!already) setOnClickListener {
+                            prefs.bypassApps = prefs.bypassApps + pkg
+                            renderApps()
+                            restartIfActive()
+                            topSig = ""
+                            renderUsage()
+                        }
+                    },
+                )
+            }
+            topBox.addView(row)
+        }
+    }
+
     private fun renderTime() {
+        renderUsage()
         if (VpnState.status != Status.ON) {
             tileTime.text = "—"
             return

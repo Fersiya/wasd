@@ -7,10 +7,12 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager.NameNotFoundException
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.os.Process
 import android.system.OsConstants
 import android.util.Log
 import io.nekohasekai.libbox.BridgeOptions
@@ -32,7 +34,10 @@ import io.nekohasekai.libbox.SystemProxyStatus
 import io.nekohasekai.libbox.TunOptions
 import io.nekohasekai.libbox.WIFIState
 import java.io.File
+import java.net.HttpURLConnection
+import java.net.InetSocketAddress
 import java.net.InterfaceAddress
+import java.net.URL
 import java.util.concurrent.Executors
 import io.nekohasekai.libbox.NetworkInterface as BoxInterface
 import io.nekohasekai.libbox.Notification as BoxNotification
@@ -112,6 +117,7 @@ class NyxarVpnService : VpnService(), PlatformInterface, CommandServerHandler {
 
             VpnState.set(Status.ON, prepared.server)
             showNotification("Подключено: ${prepared.server.name}")
+            startUsagePoll(prepared.apiPort, prefs)
         } catch (t: Throwable) {
             Log.e(TAG, "start failed", t)
             stopCore()
@@ -121,7 +127,52 @@ class NyxarVpnService : VpnService(), PlatformInterface, CommandServerHandler {
         }
     }
 
+    private var poller: java.util.concurrent.ScheduledExecutorService? = null
+
+    /** Раз в 2 секунды берёт у ядра список соединений и считает трафик по программам. */
+    private fun startUsagePoll(port: Int, prefs: Prefs) {
+        if (port == 0) return
+        val tracker = UsageTracker(prefs)
+        tracker.newSession()
+        val ex = Executors.newSingleThreadScheduledExecutor()
+        poller = ex
+        ex.scheduleWithFixedDelay({
+            try {
+                val c = URL("http://127.0.0.1:$port/connections").openConnection() as HttpURLConnection
+                c.connectTimeout = 1500
+                c.readTimeout = 1500
+                val body = c.inputStream.bufferedReader().use { it.readText() }
+                c.disconnect()
+                tracker.reload()
+                val changed = tracker.feed(body)
+                tracker.checkLimit(prefs.limitMb)?.let { level ->
+                    notifyLimit(if (level >= 2) "Месячный лимит трафика исчерпан" else "Израсходовано больше 80% месячного лимита")
+                }
+                if (changed) tracker.save()
+            } catch (_: Exception) {
+            }
+        }, 3, 2, java.util.concurrent.TimeUnit.SECONDS)
+        usage = tracker
+    }
+
+    private var usage: UsageTracker? = null
+
+    private fun notifyLimit(text: String) {
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val b = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            android.app.Notification.Builder(this, CHANNEL)
+        } else {
+            @Suppress("DEPRECATION")
+            android.app.Notification.Builder(this)
+        }
+        nm.notify(2, b.setContentTitle("Nyxar").setContentText(text).setSmallIcon(R.drawable.ic_launcher).setAutoCancel(true).build())
+    }
+
     private fun stopCore() {
+        poller?.shutdownNow()
+        poller = null
+        usage?.save()
+        usage = null
         val server = commandServer
         commandServer = null
         if (server != null) {
@@ -309,7 +360,23 @@ class NyxarVpnService : VpnService(), PlatformInterface, CommandServerHandler {
         sourcePort: Int,
         destinationAddress: String?,
         destinationPort: Int,
-    ): ConnectionOwner = error("not supported")
+    ): ConnectionOwner {
+        // нужно ядру, чтобы знать, какое приложение открыло соединение (учёт трафика по программам)
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) error("not supported")
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val uid = cm.getConnectionOwnerUid(
+            ipProtocol,
+            InetSocketAddress(sourceAddress, sourcePort),
+            InetSocketAddress(destinationAddress, destinationPort),
+        )
+        if (uid == Process.INVALID_UID) error("android: connection owner not found")
+        val packages = packageManager.getPackagesForUid(uid)?.toList() ?: emptyList()
+        val owner = ConnectionOwner()
+        owner.userId = uid
+        owner.userName = packages.firstOrNull() ?: ""
+        owner.setAndroidPackageNames(StringArray(packages))
+        return owner
+    }
 
     override fun startDefaultInterfaceMonitor(listener: InterfaceUpdateListener) {
         val w = NetworkWatcher(this)
@@ -437,3 +504,4 @@ class NyxarVpnService : VpnService(), PlatformInterface, CommandServerHandler {
 
     override fun connectSSHAgent(): Int = error("not supported")
 }
+
