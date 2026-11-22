@@ -16,6 +16,9 @@ object VpnState {
         private set
     @Volatile var error = ""
         private set
+    /** Момент (elapsedRealtime), с которого туннель поднят. */
+    @Volatile var since = 0L
+        private set
 
     private val listeners = CopyOnWriteArrayList<() -> Unit>()
     private val main = Handler(Looper.getMainLooper())
@@ -29,6 +32,7 @@ object VpnState {
     }
 
     fun set(status: Status, server: Server? = null, error: String = "") {
+        if (status == Status.ON && this.status != Status.ON) since = android.os.SystemClock.elapsedRealtime()
         this.status = status
         this.serverName = server?.name ?: ""
         this.serverKey = server?.key ?: ""
