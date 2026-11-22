@@ -12,7 +12,6 @@ import android.net.NetworkCapabilities
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
-import android.os.Process
 import android.system.OsConstants
 import android.util.Log
 import io.nekohasekai.libbox.BridgeOptions
@@ -369,7 +368,7 @@ class NyxarVpnService : VpnService(), PlatformInterface, CommandServerHandler {
             InetSocketAddress(sourceAddress, sourcePort),
             InetSocketAddress(destinationAddress, destinationPort),
         )
-        if (uid == Process.INVALID_UID) error("android: connection owner not found")
+        if (uid == android.os.Process.INVALID_UID) error("android: connection owner not found")
         val packages = packageManager.getPackagesForUid(uid)?.toList() ?: emptyList()
         val owner = ConnectionOwner()
         owner.userId = uid
