@@ -74,6 +74,9 @@ pub struct Settings {
     /// Месячный лимит трафика в МБ (0 — без лимита)
     #[serde(default)]
     pub limit_mb: u64,
+    /// Избранные серверы (ключи): в списке идут первыми
+    #[serde(default)]
+    pub favorites: Vec<String>,
 }
 
 impl Default for Settings {
@@ -92,6 +95,7 @@ impl Default for Settings {
             tg_secret: String::new(),
             saver: true,
             limit_mb: 0,
+            favorites: Vec::new(),
         }
     }
 }

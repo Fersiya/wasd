@@ -40,4 +40,14 @@ class Prefs(context: Context) {
     var usageJson: String
         get() = sp.getString("usage", "") ?: ""
         set(v) = sp.edit().putString("usage", v).apply()
+
+    /** Избранные серверы (ключи): в списке идут первыми. */
+    var favorites: Set<String>
+        get() = sp.getStringSet("favorites", emptySet())?.toSet() ?: emptySet()
+        set(v) = sp.edit().putStringSet("favorites", v).apply()
+
+    /** Сортировать серверы по пингу (иначе порядок подписки). */
+    var sortPing: Boolean
+        get() = sp.getBoolean("sort_ping", true)
+        set(v) = sp.edit().putBoolean("sort_ping", v).apply()
 }

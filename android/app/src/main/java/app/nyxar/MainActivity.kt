@@ -55,6 +55,8 @@ class MainActivity : Activity() {
     private lateinit var serverList: LinearLayout
     private lateinit var serverCount: TextView
     private lateinit var refreshBtn: TextView
+    private lateinit var sortBtn: TextView
+    private lateinit var srvSearch: EditText
     private lateinit var linkInput: EditText
     private lateinit var logBox: TextView
     private lateinit var logCard: LinearLayout
@@ -272,10 +274,37 @@ class MainActivity : Activity() {
             text("Серверы", 18f, TEXT, true),
             LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
         )
+        sortBtn = text(if (prefs.sortPing) "По пингу" else "Как в подписке", 12f, ACCENT, true).apply {
+            setPadding(dp(12), dp(4), dp(4), dp(4))
+            setOnClickListener {
+                prefs.sortPing = !prefs.sortPing
+                text = if (prefs.sortPing) "По пингу" else "Как в подписке"
+                listSig = ""
+                renderServers()
+            }
+        }
+        srvSearch = EditText(this).apply {
+            hint = "Найти сервер: страна, город, имя"
+            setHintTextColor(MUTED)
+            setTextColor(TEXT)
+            textSize = 13f
+            maxLines = 1
+            inputType = InputType.TYPE_CLASS_TEXT
+            background = rounded(BG, 12, CARD_LINE, 1)
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+            visibility = View.GONE
+            layoutParams = lp(0).apply { bottomMargin = dp(6) }
+            addTextChangedListener(object : android.text.TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                override fun afterTextChanged(s: android.text.Editable?) { listSig = ""; renderServers() }
+            })
+        }
         serversHeader.addView(serverCount)
+        serversHeader.addView(sortBtn)
         serversHeader.addView(refreshBtn)
         serverList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        pageServers.addView(card(serversHeader, serverList))
+        pageServers.addView(card(serversHeader, srvSearch, serverList))
 
         linkInput = EditText(this).apply {
             setText(prefs.link)
@@ -627,6 +656,17 @@ class MainActivity : Activity() {
             LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
         )
         if (showPing) {
+            val fav = key in prefs.favorites
+            row.addView(
+                text(if (fav) "★" else "☆", 18f, if (fav) Color.parseColor("#FBBF24") else MUTED).apply {
+                    setPadding(dp(6), 0, dp(10), 0)
+                    setOnClickListener {
+                        prefs.favorites = if (fav) prefs.favorites - key else prefs.favorites + key
+                        listSig = ""
+                        renderServers()
+                    }
+                },
+            )
             val color = when {
                 ping == null -> RED
                 ping < 120 -> GREEN
@@ -644,7 +684,8 @@ class MainActivity : Activity() {
     }
 
     private fun renderServers() {
-        val sig = "${servers.map { it.key + it.ping }}|${prefs.server}|${VpnState.status}|${VpnState.serverKey}|$refreshing|$listError"
+        val query = srvSearch.text.toString().trim().lowercase()
+        val sig = "${servers.map { it.key + it.ping }}|${prefs.server}|${VpnState.status}|${VpnState.serverKey}|$refreshing|$listError|${prefs.favorites}|${prefs.sortPing}|$query"
         if (sig == listSig) return
         listSig = sig
         serverList.removeAllViews()
@@ -670,7 +711,16 @@ class MainActivity : Activity() {
         val autoName = if (best != null) "Авто · ${best.name}" else "Авто"
         serverList.addView(serverRow("auto", autoName, null, false))
         // выбранный раньше сервер мог пропасть из подписки: тогда работает «Авто»
-        servers.forEach { serverList.addView(serverRow(it.key, it.name, it.ping, true)) }
+        srvSearch.visibility = if (servers.size > 8) View.VISIBLE else View.GONE
+        val favs = prefs.favorites
+        val shown = servers
+            .filter { query.isEmpty() || it.name.lowercase().contains(query) }
+            .sortedWith(
+                compareBy<Server> { if (it.key in favs) 0 else 1 }
+                    .thenBy { if (prefs.sortPing) (it.ping ?: Int.MAX_VALUE) else 0 },
+            )
+        shown.forEach { serverList.addView(serverRow(it.key, it.name, it.ping, true)) }
+        if (shown.isEmpty()) serverList.addView(text("Ничего не найдено.", 13f, MUTED))
         // плавное появление строк по очереди
         for (i in 0 until serverList.childCount) {
             serverList.getChildAt(i).apply {

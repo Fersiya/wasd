@@ -158,6 +158,9 @@
   .srv .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .srv .nm small { display: block; color: var(--mute); font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
   .srv.live .nm { color: var(--ok); }
+  .srv .fav { flex: none; border: 0; background: transparent; color: #4a5268; font-size: 17px; line-height: 1; padding: 2px 4px; cursor: pointer; transition: color .2s, transform .15s var(--ease); }
+  .srv .fav:hover { color: var(--warn); transform: scale(1.15); }
+  .srv .fav.on { color: #fbbf24; }
   .srv.dead .nm { color: #6b7388; }
   .tag { font-size: 10.5px; padding: 1px 7px; border-radius: 20px; margin-left: 6px; background: rgba(34,197,94,.15); color: #4ade80; vertical-align: 1px; }
   .ms { flex: none; font-size: 12px; padding: 2px 9px; border-radius: 20px; background: #0f121a; color: var(--mute); font-variant-numeric: tabular-nums; }
@@ -268,8 +271,12 @@
     <section class="card">
       <div class="hd">
         <h3>Список<em id="cnt"></em></h3>
-        <button class="ghost" id="refresh" title="Обновить список и пинг" aria-label="Обновить список и пинг">↻ Обновить</button>
+        <span style="display:flex;gap:6px">
+          <button class="ghost" id="sortbtn" title="Порядок списка">⇅ По пингу</button>
+          <button class="ghost" id="refresh" title="Обновить список и пинг" aria-label="Обновить список и пинг">↻ Обновить</button>
+        </span>
       </div>
+      <input class="txt" id="srvq" placeholder="Найти сервер: страна, город, имя" spellcheck="false" style="display:none;margin-bottom:8px">
       <div id="srvlist"></div>
       <p class="hint" id="pinghint"></p>
     </section>
@@ -421,6 +428,10 @@
     if (sub) { const s = document.createElement('small'); s.textContent = sub; nm.appendChild(s); }
     d.append(dot, nm);
     if (key !== 'auto') {
+      const f = document.createElement('button'); f.className = 'fav' + (favs.includes(key) ? ' on' : '');
+      f.textContent = favs.includes(key) ? '★' : '☆'; f.title = 'В избранное';
+      f.onclick = (e) => { e.stopPropagation(); favs = favs.includes(key) ? favs.filter((x) => x !== key) : favs.concat([key]); send({ cmd: 'fav', key }); lastSrvSig = ''; renderServers(lastState); };
+      d.appendChild(f);
       const ms = document.createElement('span');
       ms.className = 'ms ' + (ping == null ? 'bad' : ping < 120 ? 'good' : ping < 300 ? 'mid' : 'bad');
       ms.textContent = ping == null ? 'нет ответа' : ping + ' мс';
@@ -430,9 +441,16 @@
     $('srvlist').appendChild(d);
   }
 
+  let favs = [], lastState = null, sortMode = 'ping';
+  try { sortMode = localStorage.getItem('sort') === 'sub' ? 'sub' : 'ping'; } catch (e) {}
+  function sortLabel() { $('sortbtn').textContent = sortMode === 'ping' ? '⇅ По пингу' : '⇅ Как в подписке'; }
   function renderServers(s) {
     // перерисовываем список только если он изменился: иначе анимация появления играла бы каждые 2 секунды
-    const sig = JSON.stringify([s.servers, s.selected, s.connected_key, s.refreshing, !!s.link]);
+    lastState = s;
+    if (s.favs && JSON.stringify(s.favs) !== JSON.stringify(favs)) favs = s.favs.slice();
+    $('srvq').style.display = s.servers.length > 8 ? 'block' : 'none';
+    const q = $('srvq').value.trim().toLowerCase();
+    const sig = JSON.stringify([s.servers, s.selected, s.connected_key, s.refreshing, !!s.link, favs, sortMode, q]);
     $('refresh').classList.toggle('spin', !!s.refreshing);
     $('cnt').textContent = s.servers.length ? s.servers.length : '';
     const known = s.selected === 'auto' || s.servers.some((v) => v.key === s.selected);
@@ -448,7 +466,21 @@
     lastSrvSig = sig;
     $('srvlist').innerHTML = '';
     row('auto', 'Авто', best ? 'сейчас лучший: ' + best.name + ' · ' + best.ping + ' мс' : 'выберется по пингу при подключении', null, false, false, 0);
-    s.servers.forEach((v, i) => row(v.key, v.name, '', v.ping, v.key === s.connected_key, best && best.key === v.key && alive.length > 1, i + 1));
+    let list = s.servers.map((v, i) => ({ v, i })).filter((x) => !q || x.v.name.toLowerCase().includes(q));
+    list.sort((a, b) => {
+      const fa = favs.includes(a.v.key) ? 0 : 1, fb = favs.includes(b.v.key) ? 0 : 1;
+      if (fa !== fb) return fa - fb;
+      if (sortMode === 'ping') {
+        const pa = a.v.ping == null ? 1e9 : a.v.ping, pb = b.v.ping == null ? 1e9 : b.v.ping;
+        if (pa !== pb) return pa - pb;
+      }
+      return a.i - b.i;
+    });
+    list.forEach((x, i) => row(x.v.key, x.v.name, '', x.v.ping, x.v.key === s.connected_key, best && best.key === x.v.key && alive.length > 1, i + 1));
+    if (q && !list.length) {
+      const e = document.createElement('div'); e.className = 'empty'; e.textContent = 'Ничего не найдено.';
+      $('srvlist').appendChild(e);
+    }
     if (!s.servers.length) {
       const e = document.createElement('div'); e.className = 'empty';
       e.textContent = s.link ? (s.refreshing ? 'Загружаю список…' : 'Серверов пока нет. Проверь ссылку и нажми «Обновить».') : 'Добавь ссылку на подписку ниже, и серверы появятся здесь.';
@@ -626,6 +658,13 @@
   $('tgcopy').onclick = () => copyText(tgLink, () => { $('tgcopy').textContent = 'Скопировано'; setTimeout(() => { $('tgcopy').textContent = 'Копировать ссылку'; }, 1500); });
   ['bypass_ru', 'autostart', 'autoconnect', 'auto_update', 'verbose', 'tg_proxy', 'auto_switch', 'smart', 'saver'].forEach((k) =>
     $(k).onchange = (e) => send({ cmd: 'set', key: k, value: e.target.checked }));
+  sortLabel();
+  $('sortbtn').onclick = () => {
+    sortMode = sortMode === 'ping' ? 'sub' : 'ping';
+    try { localStorage.setItem('sort', sortMode); } catch (e) {}
+    sortLabel(); lastSrvSig = ''; if (lastState) renderServers(lastState);
+  };
+  $('srvq').oninput = () => { lastSrvSig = ''; if (lastState) renderServers(lastState); };
   $('save').onclick = () => { send({ cmd: 'save', link: $('link').value.trim() }); go('home'); };
   $('updbtn').onclick = () => send({ cmd: 'do_update' });
   $('chk').onclick = () => send({ cmd: 'check_update' });

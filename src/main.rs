@@ -157,6 +157,7 @@ impl App {
             "smart_on": self.st == St::On && self.server_key == engine::SMART_KEY,
             "smart_n": engine::smart_candidates(&self.servers).len(),
             "bypass_apps": self.settings.bypass_apps,
+            "favs": self.settings.favorites,
             "saver": self.settings.saver,
             "limit_mb": self.settings.limit_mb,
             "month_bytes": self.usage.total,
@@ -807,6 +808,17 @@ fn main() {
                         } else {
                             refresh_servers(&proxy, &mut app);
                             restart(&proxy, &mut app);
+                        }
+                    }
+                    "fav" => {
+                        if let Some(k) = v["key"].as_str() {
+                            let f = &mut app.settings.favorites;
+                            if let Some(i) = f.iter().position(|x| x == k) {
+                                f.remove(i);
+                            } else {
+                                f.push(k.to_string());
+                            }
+                            engine::save_settings(&app.settings);
                         }
                     }
                     "limit" => {
