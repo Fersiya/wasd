@@ -42,7 +42,7 @@ enum UserEvent {
     Ui(String),
     Show,
     /// Сколько байт отправлено и получено за подключение
-    Traffic(Option<(u64, u64)>),
+    Traffic(Option<(u64, u64)>, Option<String>),
     /// Есть ли выход в интернет через туннель
     Health(bool),
     /// Список программ для выбора: JSON-массив или текст ошибки
@@ -111,6 +111,8 @@ struct App {
     last_traffic: Option<(u64, u64, Instant)>,
     health_fails: u32,
     last_failover: Option<Instant>,
+    /// Сервер, который сейчас выбрала группа умного соединения
+    active_key: Option<String>,
     stats_busy: Arc<AtomicBool>,
     health_busy: Arc<AtomicBool>,
     tick: u32,
@@ -148,6 +150,9 @@ impl App {
             "auto_update": self.settings.auto_update,
             "verbose": self.settings.verbose,
             "auto_switch": self.settings.auto_switch,
+            "smart": self.settings.smart,
+            "smart_on": self.st == St::On && self.server_key == engine::SMART_KEY,
+            "smart_n": engine::smart_candidates(&self.servers).len(),
             "bypass_apps": self.settings.bypass_apps,
             "up": self.traffic.0,
             "down": self.traffic.1,
@@ -349,7 +354,7 @@ fn failover(proxy: &EventLoopProxy<UserEvent>, app: &mut App) {
     app.connected_at = None;
     let p = proxy.clone();
     let mut s = app.settings.clone();
-    let current = app.server_key.clone();
+    let current = app.active_key.clone().unwrap_or_else(|| app.server_key.clone());
     std::thread::spawn(move || {
         let res = engine::load_servers(&s.link).and_then(|mut list| {
             engine::ping_all(&mut list);
@@ -514,6 +519,7 @@ fn main() {
         last_traffic: None,
         health_fails: 0,
         last_failover: None,
+        active_key: None,
         stats_busy: Arc::new(AtomicBool::new(false)),
         health_busy: Arc::new(AtomicBool::new(false)),
         tick: 0,
@@ -550,7 +556,7 @@ fn main() {
                 if !app.stats_busy.swap(true, Ordering::Relaxed) {
                     let (p, busy) = (proxy.clone(), app.stats_busy.clone());
                     std::thread::spawn(move || {
-                        let _ = p.send_event(UserEvent::Traffic(engine::traffic()));
+                        let _ = p.send_event(UserEvent::Traffic(engine::traffic(), engine::active_key()));
                         busy.store(false, Ordering::Relaxed);
                     });
                 }
@@ -591,7 +597,23 @@ fn main() {
                 sync(&app, &tray, &status_item, &toggle_item, &win);
             }
 
-            Event::UserEvent(UserEvent::Traffic(t)) => {
+            Event::UserEvent(UserEvent::Traffic(t, active)) => {
+                // умное соединение: показываем, какой сервер сейчас работает, и сообщаем о переходах
+                if app.st == St::On && app.server_key == engine::SMART_KEY {
+                    if let Some(k) = active {
+                        if app.active_key.as_deref() != Some(k.as_str()) {
+                            let name = app.servers.iter().find(|x| x.key() == k).map(|x| x.name.clone());
+                            if let Some(name) = name {
+                                if app.active_key.is_some() {
+                                    notify(APP, &format!("Связь переключена на {name}"));
+                                }
+                                app.server_name = format!("Умный выбор · {name}");
+                                app.active_key = Some(k);
+                                sync(&app, &tray, &status_item, &toggle_item, &win);
+                            }
+                        }
+                    }
+                }
                 if let (Some((up, down)), true) = (t, app.st == St::On) {
                     let n = Instant::now();
                     if let Some((u0, d0, t0)) = app.last_traffic {
@@ -684,6 +706,13 @@ fn main() {
                         match v["key"].as_str().unwrap_or("") {
                             "bypass_ru" => {
                                 app.settings.bypass_ru = on;
+                                engine::save_settings(&app.settings);
+                                if app.child.is_some() {
+                                    restart(&proxy, &mut app);
+                                }
+                            }
+                            "smart" => {
+                                app.settings.smart = on;
                                 engine::save_settings(&app.settings);
                                 if app.child.is_some() {
                                     restart(&proxy, &mut app);
@@ -807,6 +836,7 @@ fn main() {
                             app.override_key = Some(key.clone()); // сервер выбран автопереключением
                         }
                         app.server_key = key;
+                        app.active_key = None;
                         app.st = St::On;
                         app.error.clear();
                         app.connected_at = Some(Instant::now());

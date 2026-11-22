@@ -53,6 +53,9 @@ pub struct Settings {
     /// Ставить обновления с GitHub автоматически (когда VPN не подключён)
     #[serde(default = "d_true")]
     pub auto_update: bool,
+    /// Умное соединение: в режиме «Авто» ядро держит несколько серверов и без разрыва уходит с упавшего
+    #[serde(default = "d_true")]
+    pub smart: bool,
     /// Сам переключаться на другой сервер, если связь пропала
     #[serde(default = "d_true")]
     pub auto_switch: bool,
@@ -76,6 +79,7 @@ impl Default for Settings {
             autoconnect: false,
             verbose: false,
             auto_update: true,
+            smart: true,
             auto_switch: true,
             bypass_apps: Vec::new(),
             tg_proxy: false,
@@ -1111,6 +1115,202 @@ fn hide_window(cmd: &mut Command) {
 }
 
 /// Запускает ядро. Возвращает процесс и название выбранного сервера.
+/// Ключ «сервера» в режиме умного соединения.
+pub const SMART_KEY: &str = "smart";
+/// Сколько серверов держим в группе одновременно.
+pub const SMART_MAX: usize = 5;
+
+/// Лучшие живые серверы для группы: по пингу, разные адреса.
+pub fn smart_candidates(servers: &[Server]) -> Vec<Server> {
+    let mut alive: Vec<&Server> = servers.iter().filter(|x| x.ping.is_some()).collect();
+    alive.sort_by_key(|x| x.ping);
+    let mut out: Vec<Server> = Vec::new();
+    for sv in alive {
+        // два сервера на одном адресе упадут вместе, резервом они не являются
+        if out.iter().any(|o| o.host == sv.host && o.port == sv.port) {
+            continue;
+        }
+        if link_supported(&sv.link).is_err() {
+            continue;
+        }
+        out.push(sv.clone());
+        if out.len() == SMART_MAX {
+            break;
+        }
+    }
+    out
+}
+
+pub struct SmartPlan {
+    /// Конфиг Xray и порт первого входа (по нему ждём запуска), если в группе есть xhttp-серверы
+    pub xray: Option<(Value, u16)>,
+    /// Все исходящие для sing-box, включая группу «proxy»
+    pub outbounds: Vec<Value>,
+    pub rules: Vec<Value>,
+    /// Ключи серверов, попавших в группу, по порядку
+    pub keys: Vec<String>,
+}
+
+/// Собирает группу серверов. Порты и адреса запрашиваются через переданные функции (так проще тестировать).
+pub fn smart_plan(
+    servers: &[Server],
+    verbose: bool,
+    mut next_port: impl FnMut() -> Result<u16, String>,
+    resolve: impl Fn(&str, u16) -> Result<std::net::IpAddr, String>,
+) -> Result<SmartPlan, String> {
+    let mut sing: Vec<Value> = Vec::new();
+    let mut keys: Vec<String> = Vec::new();
+    let mut x_in: Vec<Value> = Vec::new();
+    let mut x_out: Vec<Value> = Vec::new();
+    let mut x_route: Vec<Value> = Vec::new();
+    let mut rules: Vec<Value> = Vec::new();
+    let mut first_port = 0u16;
+
+    for (i, sv) in servers.iter().enumerate() {
+        let key = sv.key();
+        if needs_xray(&sv.link) {
+            let built = (|| -> Result<(Value, Value, u16, String), String> {
+                let v = parse_vless(&sv.link)?;
+                let ip = resolve(&v.host, v.port)?;
+                let port = next_port()?;
+                let mut xo = xray_outbound(&sv.link, Some(&ip.to_string()))?;
+                xo["tag"] = json!(format!("o{i}"));
+                let inbound = json!({
+                    "tag": format!("i{i}"), "listen": "127.0.0.1", "port": port, "protocol": "socks",
+                    "settings": { "auth": "noauth", "udp": true, "ip": "127.0.0.1" }
+                });
+                let cidr = match ip {
+                    std::net::IpAddr::V4(_) => format!("{ip}/32"),
+                    std::net::IpAddr::V6(_) => format!("{ip}/128"),
+                };
+                Ok((xo, inbound, port, cidr))
+            })();
+            // сервер, который не получилось подготовить, просто пропускаем
+            let Ok((xo, inbound, port, cidr)) = built else { continue };
+            if first_port == 0 {
+                first_port = port;
+            }
+            x_route.push(json!({ "type": "field", "inboundTag": [format!("i{i}")], "outboundTag": format!("o{i}") }));
+            x_out.push(xo);
+            x_in.push(inbound);
+            rules.push(json!({ "ip_cidr": [cidr], "action": "route", "outbound": "direct" }));
+            sing.push(json!({ "type": "socks", "tag": key, "server": "127.0.0.1", "server_port": port, "version": "5" }));
+        } else {
+            let Ok(mut ob) = vless_outbound(&sv.link) else { continue };
+            ob["tag"] = json!(key);
+            sing.push(ob);
+        }
+        keys.push(key);
+    }
+    if keys.is_empty() {
+        return Err("Не удалось подготовить ни одного сервера".into());
+    }
+    if !x_in.is_empty() {
+        rules.push(json!({ "process_name": ["xray.exe", "xray"], "action": "route", "outbound": "direct" }));
+    }
+    let group = json!({
+        "type": "urltest", "tag": "proxy",
+        "outbounds": keys,
+        "url": "https://www.gstatic.com/generate_204",
+        "interval": "40s",
+        "tolerance": 60,
+        "idle_timeout": "20m",
+        "interrupt_exist_connections": true
+    });
+    let mut outbounds = vec![group];
+    outbounds.extend(sing);
+    let xray = if x_in.is_empty() {
+        None
+    } else {
+        x_out.push(json!({ "tag": "direct", "protocol": "freedom" }));
+        Some((
+            json!({
+                "log": { "loglevel": if verbose { "info" } else { "warning" } },
+                "inbounds": x_in,
+                "outbounds": x_out,
+                "routing": { "rules": x_route }
+            }),
+            first_port,
+        ))
+    };
+    Ok(SmartPlan { xray, outbounds, rules, keys })
+}
+
+/// Конфиг sing-box для умного соединения.
+pub fn smart_config(plan: &SmartPlan, bypass_ru: bool, verbose: bool) -> Value {
+    let mut cfg = build_config(plan.outbounds[0].clone(), bypass_ru, verbose);
+    if let Some(obs) = cfg["outbounds"].as_array_mut() {
+        // группа уже стоит первой (из build_config), остальные серверы добавляем после неё
+        for o in plan.outbounds.iter().skip(1) {
+            obs.push(o.clone());
+        }
+    }
+    if let Some(rules) = cfg["route"]["rules"].as_array_mut() {
+        for (i, r) in plan.rules.iter().enumerate() {
+            rules.insert(1 + i, r.clone());
+        }
+    }
+    cfg
+}
+
+fn smart_launch(
+    core: &std::path::Path,
+    core_dir: &std::path::Path,
+    dir: &std::path::Path,
+    cand: &[Server],
+    s: &Settings,
+) -> Result<Child, String> {
+    let plan = smart_plan(cand, s.verbose, free_port, resolve_server)?;
+    if let Some((cfg, port)) = &plan.xray {
+        start_xray(core_dir, cfg, *port)?;
+    }
+    launch_core(core, core_dir, dir, smart_config(&plan, s.bypass_ru, s.verbose), s)
+}
+
+/// Какой сервер сейчас выбран группой (ключ), если включено умное соединение.
+pub fn active_key() -> Option<String> {
+    let port = API_PORT.load(Ordering::Relaxed);
+    if port == 0 {
+        return None;
+    }
+    let agent = ureq::AgentBuilder::new().timeout(Duration::from_millis(1500)).build();
+    let body = agent.get(&format!("http://127.0.0.1:{port}/proxies/proxy")).call().ok()?.into_string().ok()?;
+    let v: Value = serde_json::from_str(&body).ok()?;
+    v["now"].as_str().map(|x| x.to_string())
+}
+
+/// Дописывает в конфиг служебные вещи, сохраняет его и запускает sing-box.
+fn launch_core(core: &std::path::Path, core_dir: &std::path::Path, dir: &std::path::Path, cfg: Value, s: &Settings) -> Result<Child, String> {
+    let mut cfg = cfg;
+    let api = free_port().unwrap_or(0);
+    API_PORT.store(api, Ordering::Relaxed);
+    apply_extras(&mut cfg, &s.bypass_apps, api);
+    let cfg_path = dir.join("config.json");
+    fs::write(&cfg_path, serde_json::to_string_pretty(&cfg).unwrap_or_default())
+        .map_err(|e| format!("Не записался config.json: {e}"))?;
+
+    let log = fs::File::create(dir.join("sing-box.log"))
+        .map_err(|e| { stop_sidecar(); format!("Не создался sing-box.log: {e}") })?;
+    let log_err = log
+        .try_clone()
+        .map_err(|e| { stop_sidecar(); format!("Не создался sing-box.log: {e}") })?;
+
+    let mut cmd = Command::new(core);
+    cmd.arg("run")
+        .arg("-c")
+        .arg(&cfg_path)
+        .current_dir(core_dir)
+        .stdin(Stdio::null())
+        .stdout(log)
+        .stderr(log_err);
+    hide_window(&mut cmd);
+    let child = cmd
+        .spawn()
+        .map_err(|e| { stop_sidecar(); format!("Не запустился sing-box: {e}") })?;
+    adopt(&child);
+    Ok(child)
+}
+
 pub fn start_core(s: &Settings) -> Result<(Child, String, String), String> {
     let core = core_path()?;
     let core_dir = core.parent().map(|p| p.to_path_buf()).unwrap_or_else(base_dir);
@@ -1125,6 +1325,18 @@ pub fn start_core(s: &Settings) -> Result<(Child, String, String), String> {
     if !known {
         ping_all(&mut servers);
     }
+    // умное соединение: несколько серверов в одной группе, переключение без разрыва
+    if s.smart && s.server == "auto" {
+        let cand = smart_candidates(&servers);
+        if cand.len() >= 2 {
+            stop_sidecar();
+            match smart_launch(&core, &core_dir, &dir, &cand, s) {
+                Ok(child) => return Ok((child, "Умный выбор".to_string(), SMART_KEY.to_string())),
+                Err(_) => stop_sidecar(), // не вышло: подключаемся к одному серверу, как раньше
+            }
+        }
+    }
+
     let srv = pick_server(&servers, &s.server)
         .ok_or("Нет доступных серверов")?
         .clone();
@@ -1146,33 +1358,7 @@ pub fn start_core(s: &Settings) -> Result<(Child, String, String), String> {
     } else {
         build_config(vless_outbound(&srv.link)?, s.bypass_ru, s.verbose)
     };
-    let mut cfg = cfg;
-    let api = free_port().unwrap_or(0);
-    API_PORT.store(api, Ordering::Relaxed);
-    apply_extras(&mut cfg, &s.bypass_apps, api);
-    let cfg_path = dir.join("config.json");
-    fs::write(&cfg_path, serde_json::to_string_pretty(&cfg).unwrap_or_default())
-        .map_err(|e| format!("Не записался config.json: {e}"))?;
-
-    let log = fs::File::create(dir.join("sing-box.log"))
-        .map_err(|e| { stop_sidecar(); format!("Не создался sing-box.log: {e}") })?;
-    let log_err = log
-        .try_clone()
-        .map_err(|e| { stop_sidecar(); format!("Не создался sing-box.log: {e}") })?;
-
-    let mut cmd = Command::new(core);
-    cmd.arg("run")
-        .arg("-c")
-        .arg(&cfg_path)
-        .current_dir(&core_dir)
-        .stdin(Stdio::null())
-        .stdout(log)
-        .stderr(log_err);
-    hide_window(&mut cmd);
-    let child = cmd
-        .spawn()
-        .map_err(|e| { stop_sidecar(); format!("Не запустился sing-box: {e}") })?;
-    adopt(&child);
+    let child = launch_core(&core, &core_dir, &dir, cfg, s)?;
     let key = srv.key();
     Ok((child, srv.name, key))
 }
@@ -1398,6 +1584,71 @@ mod tests {
         assert!(is_dummy(&parse_server(loopback).unwrap()));
         assert!(is_dummy(&parse_server(info).unwrap()));
         assert!(!is_dummy(&parse_server(LINK).unwrap()));
+    }
+
+    fn server(name: &str, host: &str, ping: u32, xhttp: bool) -> Server {
+        let mut link = LINK.replace("example.org", host);
+        if xhttp {
+            link = link.replace("type=tcp", "type=xhttp&mode=packet-up&path=%2Fx");
+        }
+        Server { name: name.into(), host: host.into(), port: 443, link, ping: Some(ping) }
+    }
+
+    #[test]
+    fn smart_candidates_best_first_distinct() {
+        let mut list = vec![server("a", "1.1.1.1", 80, false), server("b", "2.2.2.2", 20, false), server("c", "1.1.1.1", 10, false)];
+        list.push(Server { ping: None, ..server("dead", "3.3.3.3", 5, false) });
+        let c = smart_candidates(&list);
+        assert_eq!(c.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(), vec!["c", "b"]);
+    }
+
+    #[test]
+    fn smart_plan_mixes_native_and_xray() {
+        let list = vec![server("a", "198.51.100.1", 10, false), server("x", "198.51.100.2", 20, true), server("b", "198.51.100.3", 30, false)];
+        let mut p = 40000u16;
+        let plan = smart_plan(&list, false, || { p += 1; Ok(p) }, |_, _| Ok("198.51.100.2".parse().unwrap())).unwrap();
+        assert_eq!(plan.keys.len(), 3);
+        let group = &plan.outbounds[0];
+        assert_eq!(group["type"], "urltest");
+        assert_eq!(group["tag"], "proxy");
+        assert_eq!(group["outbounds"].as_array().unwrap().len(), 3);
+        // каждый сервер из группы существует как исходящее с тем же тегом
+        for k in &plan.keys {
+            assert!(plan.outbounds.iter().any(|o| o["tag"] == json!(k)));
+        }
+        let (x, port) = plan.xray.as_ref().unwrap();
+        assert_eq!(*port, 40001);
+        assert_eq!(x["inbounds"].as_array().unwrap().len(), 1);
+        assert_eq!(x["routing"]["rules"][0]["inboundTag"][0], "i1");
+        assert_eq!(x["routing"]["rules"][0]["outboundTag"], "o1");
+        assert_eq!(x["outbounds"][0]["tag"], "o1");
+        assert!(plan.rules.iter().any(|r| r["ip_cidr"][0] == "198.51.100.2/32"));
+        assert!(plan.rules.iter().any(|r| r["process_name"].is_array()));
+    }
+
+    #[test]
+    fn smart_config_is_consistent() {
+        let list = vec![server("a", "198.51.100.1", 10, false), server("b", "198.51.100.3", 30, false)];
+        let plan = smart_plan(&list, false, || Ok(1), |_, _| Err("x".into())).unwrap();
+        assert!(plan.xray.is_none());
+        let cfg = smart_config(&plan, true, false);
+        let obs = cfg["outbounds"].as_array().unwrap();
+        // группа, два сервера и direct, теги не повторяются
+        let tags: Vec<&str> = obs.iter().map(|o| o["tag"].as_str().unwrap()).collect();
+        assert_eq!(tags.iter().filter(|t| **t == "proxy").count(), 1);
+        assert!(tags.contains(&"direct"));
+        assert_eq!(obs.len(), 4);
+        assert_eq!(cfg["route"]["final"], "proxy");
+        assert_eq!(cfg["route"]["rules"][0]["action"], "sniff");
+    }
+
+    #[test]
+    fn smart_plan_skips_unpreparable_servers() {
+        let list = vec![server("x", "198.51.100.2", 20, true), server("a", "198.51.100.1", 10, false)];
+        let plan = smart_plan(&list, false, || Ok(1), |_, _| Err("нет DNS".into())).unwrap();
+        assert_eq!(plan.keys.len(), 1);
+        assert!(plan.xray.is_none());
+        assert!(smart_plan(&[server("x", "198.51.100.2", 20, true)], false, || Ok(1), |_, _| Err("нет".into())).is_err());
     }
 
     #[test]
