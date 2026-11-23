@@ -2051,7 +2051,9 @@ mod tests {
         assert!(tags.contains(&"direct"));
         assert_eq!(obs.len(), 4);
         assert_eq!(cfg["route"]["final"], "proxy");
-        assert_eq!(cfg["route"]["rules"][0]["action"], "sniff");
+        assert_eq!(cfg["route"]["rules"][0]["ip_version"], 6);
+        assert_eq!(cfg["route"]["rules"][0]["action"], "reject");
+        assert_eq!(cfg["route"]["rules"][1]["action"], "sniff");
     }
 
     #[test]

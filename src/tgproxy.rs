@@ -418,6 +418,7 @@ struct Ws {
 #[derive(Debug)]
 enum WsError {
     /// Сервер ответил не 101 (например, 302): WebSocket для этого DC недоступен.
+    #[allow(dead_code)]
     Status(u16),
     Io(io::Error),
 }

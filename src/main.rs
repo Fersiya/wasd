@@ -9,8 +9,6 @@ mod update;
 use engine::{Server, Settings, APP};
 use serde_json::{json, Value};
 use std::{
-    io::{Read, Write},
-    net::{TcpListener, TcpStream},
     process::Child,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -985,7 +983,7 @@ fn main() {
 
             Event::UserEvent(UserEvent::Started(result)) => {
                 if app.st == St::Off {
-                    if let Ok((mut c, _, _)) = result {
+                    if let Ok((c, _, _)) = result {
                         std::thread::spawn(move || {
                             engine::stop_core(&mut Some(c));
                         });
