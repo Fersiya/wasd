@@ -66,11 +66,19 @@ fn config() -> Arc<rustls::ClientConfig> {
 pub fn tls_name(link: &str, host: &str) -> Option<String> {
     let u = Url::parse(link).ok()?;
     let q = |k: &str| u.query_pairs().find(|(n, _)| n == k).map(|(_, v)| v.to_string());
-    match q("security").as_deref() {
-        Some("tls") | Some("reality") => {}
+    match u.scheme() {
+        "trojan" => {}
+        "vless" => match q("security").as_deref() {
+            Some("tls") | Some("reality") => {}
+            _ => return None,
+        },
         _ => return None,
     }
-    let name = q("sni").or_else(|| q("serverName")).filter(|s| !s.is_empty()).unwrap_or_else(|| host.to_string());
+    let name = q("sni")
+        .or_else(|| q("serverName"))
+        .or_else(|| q("peer"))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| host.to_string());
     // для IP без SNI рукопожатие смысла не имеет
     if name.parse::<std::net::IpAddr>().is_ok() {
         None
@@ -96,9 +104,37 @@ fn handshake(addr: std::net::SocketAddr, sni: &str) -> io::Result<u32> {
     Ok(t.elapsed().as_millis() as u32)
 }
 
+/// UDP-проверка для QUIC / Hysteria 2: отправляем запрос версии QUIC (RFC 9000).
+fn quic_ping(addr: std::net::SocketAddr) -> Option<u32> {
+    use std::net::UdpSocket;
+    let bind_addr = if addr.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" };
+    let sock = UdpSocket::bind(bind_addr).ok()?;
+    sock.set_read_timeout(Some(Duration::from_millis(1500))).ok()?;
+    let t = Instant::now();
+    let mut packet = [0u8; 1200];
+    packet[0] = 0xc0; // Long header
+    packet[5] = 8;    // DCID len
+    packet[6..14].copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+    packet[14] = 8;   // SCID len
+    packet[15..23].copy_from_slice(&[8, 7, 6, 5, 4, 3, 2, 1]);
+    sock.send_to(&packet, addr).ok()?;
+    let mut resp = [0u8; 1500];
+    if let Ok((n, _)) = sock.recv_from(&mut resp) {
+        if n > 0 {
+            return Some(t.elapsed().as_millis().max(1) as u32);
+        }
+    }
+    None
+}
+
 /// Задержка до сервера в мс или None, если он не отвечает.
 pub fn ping(host: &str, port: u16, link: &str) -> Option<u32> {
     let addr = (host, port).to_socket_addrs().ok()?.next()?;
+    if let Ok(u) = Url::parse(link) {
+        if u.scheme() == "hysteria2" || u.scheme() == "hy2" {
+            return quic_ping(addr);
+        }
+    }
     if let Some(name) = tls_name(link, host) {
         // два замера, берём лучший: первый часто включает прогрев маршрута
         let a = handshake(addr, &name).ok();
@@ -123,6 +159,8 @@ mod tests {
         assert_eq!(tls_name("vless://u@h.example.org:443?security=tls&type=ws", "h.example.org").as_deref(), Some("h.example.org"));
         assert_eq!(tls_name("vless://u@h.example.org:443?security=none", "h.example.org"), None);
         assert_eq!(tls_name("vless://u@1.2.3.4:443?security=tls", "1.2.3.4"), None);
+        assert_eq!(tls_name("trojan://pass@example.com:443?sni=sni.example.com", "example.com").as_deref(), Some("sni.example.com"));
+        assert_eq!(tls_name("hysteria2://pass@example.com:443?sni=sni.example.com", "example.com"), None);
     }
 
     #[test]

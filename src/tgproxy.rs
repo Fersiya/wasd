@@ -433,17 +433,24 @@ impl Ws {
         );
         tls.write_all(req.as_bytes()).map_err(WsError::Io)?;
         let mut head = Vec::new();
-        let mut one = [0u8; 1];
-        // читаем заголовки до \r\n\r\n по байту: лишнего не заберём
-        while !head.ends_with(b"\r\n\r\n") {
+        let mut chunk = [0u8; 1024];
+        let mut leftover = Vec::new();
+        while !head.windows(4).any(|w| w == b"\r\n\r\n") {
             if head.len() > 16384 {
                 return Err(WsError::Io(io::Error::new(io::ErrorKind::InvalidData, "слишком длинный ответ")));
             }
-            match tls.read(&mut one) {
-                Ok(0) => return Err(WsError::Io(io::ErrorKind::UnexpectedEof.into())),
-                Ok(_) => head.push(one[0]),
-                Err(e) => return Err(WsError::Io(e)),
+            let n = tls.read(&mut chunk).map_err(WsError::Io)?;
+            if n == 0 {
+                return Err(WsError::Io(io::ErrorKind::UnexpectedEof.into()));
             }
+            head.extend_from_slice(&chunk[..n]);
+        }
+        if let Some(pos) = head.windows(4).position(|w| w == b"\r\n\r\n") {
+            let extra = &head[pos + 4..];
+            if !extra.is_empty() {
+                leftover.extend_from_slice(extra);
+            }
+            head.truncate(pos + 4);
         }
         let text = String::from_utf8_lossy(&head);
         let status: u16 = text.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -453,7 +460,7 @@ impl Ws {
         // дальше таймаут не нужен: соединение живёт, пока его не закроет клиент
         tls.sock.set_read_timeout(None).ok();
         tls.sock.set_write_timeout(Some(Duration::from_secs(30))).ok();
-        Ok(Self { tls, buf: Mutex::new(Vec::new()) })
+        Ok(Self { tls, buf: Mutex::new(leftover) })
     }
 
     fn send(&self, data: &[u8]) -> io::Result<()> {

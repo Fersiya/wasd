@@ -141,22 +141,81 @@ const CORE_FILES: &[(&str, &[u8])] = &[
     ("xray.exe", include_bytes!("../assets/xray.exe.gz")),
 ];
 
+#[cfg(windows)]
+mod proc {
+    use std::path::Path;
+
+    #[repr(C)]
+    struct ProcessEntry32W {
+        dw_size: u32,
+        cnt_usage: u32,
+        th32_process_id: u32,
+        th32_default_heap_id: usize,
+        th32_module_id: u32,
+        cnt_threads: u32,
+        th32_parent_process_id: u32,
+        pc_pri_class_base: i32,
+        dw_flags: u32,
+        sz_exe_file: [u16; 260],
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateToolhelp32Snapshot(dw_flags: u32, th32_process_id: u32) -> isize;
+        fn Process32FirstW(h_snapshot: isize, lppe: *mut ProcessEntry32W) -> i32;
+        fn Process32NextW(h_snapshot: isize, lppe: *mut ProcessEntry32W) -> i32;
+        fn OpenProcess(dw_desired_access: u32, b_inherit_handle: i32, dw_process_id: u32) -> isize;
+        fn TerminateProcess(h_process: isize, u_exit_code: u32) -> i32;
+        fn CloseHandle(h_object: isize) -> i32;
+        fn QueryFullProcessImageNameW(h_proc: isize, dw_flags: u32, lp_exe_name: *mut u16, lpdw_size: *mut u32) -> i32;
+    }
+
+    const TH32CS_SNAPPROCESS: u32 = 0x00000002;
+    const PROCESS_TERMINATE: u32 = 0x0001;
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+
+    pub fn kill_stale_in(dir: &Path) {
+        let snap = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+        if snap == -1 || snap == 0 {
+            return;
+        }
+        let dir_str = dir.display().to_string().to_lowercase();
+        let mut pe: ProcessEntry32W = unsafe { std::mem::zeroed() };
+        pe.dw_size = std::mem::size_of::<ProcessEntry32W>() as u32;
+
+        if unsafe { Process32FirstW(snap, &mut pe) } != 0 {
+            loop {
+                let end = pe.sz_exe_file.iter().position(|&c| c == 0).unwrap_or(pe.sz_exe_file.len());
+                let exe_name = String::from_utf16_lossy(&pe.sz_exe_file[..end]).to_lowercase();
+                if exe_name == "sing-box.exe" || exe_name == "xray.exe" {
+                    let pid = pe.th32_process_id;
+                    let h_proc = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE, 0, pid) };
+                    if h_proc != 0 {
+                        let mut path_buf = [0u16; 1024];
+                        let mut size = path_buf.len() as u32;
+                        let ok = unsafe { QueryFullProcessImageNameW(h_proc, 0, path_buf.as_mut_ptr(), &mut size) };
+                        if ok != 0 {
+                            let full_path = String::from_utf16_lossy(&path_buf[..size as usize]).to_lowercase();
+                            if full_path.starts_with(&dir_str) {
+                                unsafe { TerminateProcess(h_proc, 1); }
+                            }
+                        }
+                        unsafe { CloseHandle(h_proc); }
+                    }
+                }
+                if unsafe { Process32NextW(snap, &mut pe) } == 0 {
+                    break;
+                }
+            }
+        }
+        unsafe { CloseHandle(snap); }
+    }
+}
+
 /// Завершает sing-box.exe / xray.exe, запущенные из папки ядра Nyxar (остались от прошлого запуска).
 fn kill_stale_core(dir: &std::path::Path) {
     #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        let d = dir.display().to_string().replace('\'', "''");
-        let script = format!(
-            "Get-Process sing-box,xray -ErrorAction SilentlyContinue | \
-             Where-Object {{ $_.Path -and $_.Path.StartsWith('{d}', [StringComparison]::OrdinalIgnoreCase) }} | \
-             Stop-Process -Force"
-        );
-        let _ = Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-            .creation_flags(0x0800_0000)
-            .status();
-    }
+    proc::kill_stale_in(dir);
     #[cfg(not(windows))]
     let _ = dir;
 }
@@ -290,7 +349,11 @@ fn is_dummy(s: &Server) -> bool {
 }
 
 fn decode_maybe_b64(text: &str) -> String {
-    if text.contains("vless://") {
+    if text.contains("vless://")
+        || text.contains("trojan://")
+        || text.contains("hysteria2://")
+        || text.contains("hy2://")
+    {
         return text.to_string();
     }
     let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
@@ -335,7 +398,12 @@ fn extract_links(text: &str) -> Vec<String> {
     decode_maybe_b64(text)
         .lines()
         .map(str::trim)
-        .filter(|l| l.starts_with("vless://"))
+        .filter(|l| {
+            l.starts_with("vless://")
+                || l.starts_with("trojan://")
+                || l.starts_with("hysteria2://")
+                || l.starts_with("hy2://")
+        })
         .map(String::from)
         .collect()
 }
@@ -388,7 +456,7 @@ fn fetch_links_net(src: &str) -> Result<Vec<String>, String> {
     if !(src.starts_with("http://") || src.starts_with("https://")) {
         let links = extract_links(src);
         return if links.is_empty() {
-            Err("Не нашёл ни одной ссылки vless://".into())
+            Err("Не нашёл ни одной рабочей ссылки (vless://, trojan://, hysteria2://)".into())
         } else {
             Ok(links)
         };
@@ -396,7 +464,7 @@ fn fetch_links_net(src: &str) -> Result<Vec<String>, String> {
 
     let start = GOOD_UA.load(Ordering::Relaxed) % USER_AGENTS.len();
     let mut stub: Option<String> = None;
-    let mut last_err = String::from("Не нашёл ни одной ссылки vless://");
+    let mut last_err = String::from("Не нашёл ни одной рабочей ссылки (vless://, trojan://, hysteria2://)");
     for i in 0..USER_AGENTS.len() {
         let idx = (start + i) % USER_AGENTS.len();
         match download_subscription(src, USER_AGENTS[idx]) {
@@ -429,7 +497,8 @@ fn fetch_links_net(src: &str) -> Result<Vec<String>, String> {
 
 pub fn parse_server(link: &str) -> Option<Server> {
     let u = Url::parse(link.trim()).ok()?;
-    if u.scheme() != "vless" {
+    let scheme = u.scheme();
+    if scheme != "vless" && scheme != "trojan" && scheme != "hysteria2" && scheme != "hy2" {
         return None;
     }
     let host = u.host_str()?.trim_matches(|c| c == '[' || c == ']').to_string();
@@ -622,6 +691,154 @@ pub fn vless_outbound(link: &str) -> Result<Value, String> {
     Ok(out)
 }
 
+pub fn trojan_outbound(link: &str) -> Result<Value, String> {
+    let u = Url::parse(link.trim()).map_err(|e| format!("Неверная ссылка: {e}"))?;
+    if u.scheme() != "trojan" {
+        return Err("Нужна ссылка trojan://".into());
+    }
+    let host = u
+        .host_str()
+        .ok_or("В ссылке нет адреса сервера")?
+        .trim_matches(|c| c == '[' || c == ']')
+        .to_string();
+    let port = u.port().unwrap_or(443);
+    let password = percent_decode_str(u.username()).decode_utf8_lossy().to_string();
+    if password.is_empty() {
+        return Err("В ссылке нет пароля Trojan".into());
+    }
+
+    let q: HashMap<String, String> = u.query_pairs().into_owned().collect();
+    let g = |k: &str| q.get(k).map(|s| s.as_str()).unwrap_or("");
+
+    let sni = if !g("sni").is_empty() {
+        g("sni").to_string()
+    } else if !g("peer").is_empty() {
+        g("peer").to_string()
+    } else if !g("host").is_empty() {
+        g("host").to_string()
+    } else {
+        host.clone()
+    };
+    let fp = if g("fp").is_empty() { "chrome" } else { g("fp") };
+
+    let mut tls = json!({
+        "enabled": true,
+        "server_name": sni,
+        "utls": { "enabled": true, "fingerprint": fp }
+    });
+    if !g("alpn").is_empty() {
+        tls["alpn"] = json!(g("alpn").split(',').collect::<Vec<_>>());
+    }
+    if matches!(g("allowInsecure"), "1" | "true") || matches!(g("insecure"), "1" | "true") {
+        tls["insecure"] = json!(true);
+    }
+
+    let mut out = json!({
+        "type": "trojan",
+        "tag": "proxy",
+        "server": host,
+        "server_port": port,
+        "password": password,
+        "tls": tls,
+    });
+
+    let path = if g("path").is_empty() { "/" } else { g("path") };
+    match g("type") {
+        "" | "tcp" => {}
+        "ws" => {
+            let mut t = json!({ "type": "ws", "path": path });
+            if !g("host").is_empty() {
+                t["headers"] = json!({ "Host": g("host") });
+            }
+            out["transport"] = t;
+        }
+        "grpc" => {
+            out["transport"] = json!({ "type": "grpc", "service_name": g("serviceName") });
+        }
+        "httpupgrade" => {
+            let mut t = json!({ "type": "httpupgrade", "path": path });
+            if !g("host").is_empty() {
+                t["host"] = json!(g("host"));
+            }
+            out["transport"] = t;
+        }
+        other => return Err(format!("Транспорт {other} не поддерживается для Trojan")),
+    }
+
+    Ok(out)
+}
+
+pub fn hysteria2_outbound(link: &str) -> Result<Value, String> {
+    let u = Url::parse(link.trim()).map_err(|e| format!("Неверная ссылка: {e}"))?;
+    if u.scheme() != "hysteria2" && u.scheme() != "hy2" {
+        return Err("Нужна ссылка hysteria2:// или hy2://".into());
+    }
+    let host = u
+        .host_str()
+        .ok_or("В ссылке нет адреса сервера")?
+        .trim_matches(|c| c == '[' || c == ']')
+        .to_string();
+    let port = u.port().unwrap_or(443);
+    let mut password = percent_decode_str(u.username()).decode_utf8_lossy().to_string();
+
+    let q: HashMap<String, String> = u.query_pairs().into_owned().collect();
+    let g = |k: &str| q.get(k).map(|s| s.as_str()).unwrap_or("");
+
+    if password.is_empty() && !g("auth").is_empty() {
+        password = g("auth").to_string();
+    }
+    if password.is_empty() {
+        return Err("В ссылке нет пароля Hysteria2".into());
+    }
+
+    let sni = if !g("sni").is_empty() {
+        g("sni").to_string()
+    } else if !g("peer").is_empty() {
+        g("peer").to_string()
+    } else {
+        host.clone()
+    };
+
+    let mut tls = json!({
+        "enabled": true,
+        "server_name": sni,
+    });
+    if matches!(g("insecure"), "1" | "true") {
+        tls["insecure"] = json!(true);
+    }
+    if !g("alpn").is_empty() {
+        tls["alpn"] = json!(g("alpn").split(',').collect::<Vec<_>>());
+    }
+
+    let mut out = json!({
+        "type": "hysteria2",
+        "tag": "proxy",
+        "server": host,
+        "server_port": port,
+        "password": password,
+        "tls": tls,
+    });
+
+    if !g("obfs").is_empty() {
+        out["obfs"] = json!({
+            "type": g("obfs"),
+            "password": g("obfs-password")
+        });
+    }
+
+    Ok(out)
+}
+
+pub fn native_outbound(link: &str) -> Result<Value, String> {
+    let u = Url::parse(link.trim()).map_err(|e| format!("Неверная ссылка: {e}"))?;
+    match u.scheme() {
+        "vless" => vless_outbound(link),
+        "trojan" => trojan_outbound(link),
+        "hysteria2" | "hy2" => hysteria2_outbound(link),
+        other => Err(format!("Протокол {other} не поддерживается")),
+    }
+}
+
 // ───────────────────────── Xray (xhttp и др.) ─────────────────────────
 // sing-box не умеет xhttp и VLESS encryption. Такие серверы обслуживает Xray-core:
 // sing-box (TUN) -> socks 127.0.0.1:порт -> xray -> сервер.
@@ -749,7 +966,7 @@ pub fn xray_outbound(link: &str, addr: Option<&str>) -> Result<Value, String> {
 
 /// Подходит ли ссылка хотя бы одному из ядер (sing-box напрямую или через Xray).
 pub fn link_supported(link: &str) -> Result<(), String> {
-    if vless_outbound(link).is_ok() {
+    if native_outbound(link).is_ok() {
         return Ok(());
     }
     xray_outbound(link, None).map(|_| ())
@@ -757,7 +974,7 @@ pub fn link_supported(link: &str) -> Result<(), String> {
 
 /// Нужен ли для ссылки Xray (sing-box её не потянет).
 pub fn needs_xray(link: &str) -> bool {
-    vless_outbound(link).is_err() && xray_outbound(link, None).is_ok()
+    native_outbound(link).is_err() && xray_outbound(link, None).is_ok()
 }
 
 pub fn xray_config(outbound: Value, port: u16, verbose: bool) -> Value {
@@ -801,20 +1018,44 @@ pub fn sidecar_plan(link: &str, ip: std::net::IpAddr, port: u16, verbose: bool) 
     })
 }
 
+fn resolve_doh(host: &str) -> Result<std::net::IpAddr, String> {
+    let url = format!("https://1.1.1.1/dns-query?name={host}&type=A");
+    let resp = ureq::get(&url)
+        .set("Accept", "application/dns-json")
+        .timeout(Duration::from_secs(3))
+        .call()
+        .map_err(|e| e.to_string())?;
+    let body = resp.into_string().map_err(|e| e.to_string())?;
+    let v: Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
+    if let Some(answers) = v["Answer"].as_array() {
+        for a in answers {
+            if a["type"].as_u64() == Some(1) {
+                if let Some(data) = a["data"].as_str() {
+                    if let Ok(ip) = data.parse::<std::net::IpAddr>() {
+                        return Ok(ip);
+                    }
+                }
+            }
+        }
+    }
+    Err("DoH не вернул IP-адрес".into())
+}
+
 fn resolve_server(host: &str, port: u16) -> Result<std::net::IpAddr, String> {
     if let Ok(ip) = host.parse::<std::net::IpAddr>() {
         return Ok(ip);
     }
-    let addrs: Vec<_> = (host, port)
-        .to_socket_addrs()
-        .map_err(|e| format!("Не удалось определить адрес сервера {host}: {e}"))?
-        .collect();
-    addrs
-        .iter()
-        .find(|a| a.is_ipv4())
-        .or_else(|| addrs.first())
-        .map(|a| a.ip())
-        .ok_or_else(|| format!("Не удалось определить адрес сервера {host}"))
+    if let Ok(addrs) = (host, port).to_socket_addrs() {
+        let list: Vec<_> = addrs.collect();
+        if let Some(ip) = list.iter().find(|a| a.is_ipv4()).or_else(|| list.first()).map(|a| a.ip()) {
+            return Ok(ip);
+        }
+    }
+    // Если системный DNS провайдера заблокирован или сбоит, пробуем DoH
+    if let Ok(ip) = resolve_doh(host) {
+        return Ok(ip);
+    }
+    Err(format!("Не удалось определить адрес сервера {host}"))
 }
 
 fn free_port() -> Result<u16, String> {
@@ -898,53 +1139,143 @@ fn start_xray(core_dir: &std::path::Path, cfg: &Value, port: u16) -> Result<(), 
     Ok(())
 }
 
+#[cfg(windows)]
+mod app_list {
+    use serde_json::{json, Value};
+    use std::{collections::HashMap, fs, path::PathBuf};
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn EnumWindows(lp_enum_func: unsafe extern "system" fn(isize, isize) -> i32, l_param: isize) -> i32;
+        fn IsWindowVisible(h_wnd: isize) -> i32;
+        fn GetWindowTextLengthW(h_wnd: isize) -> i32;
+        fn GetWindowTextW(h_wnd: isize, lp_string: *mut u16, n_max_count: i32) -> i32;
+        fn GetWindowThreadProcessId(h_wnd: isize, lpdw_process_id: *mut u32) -> u32;
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn OpenProcess(dw_desired_access: u32, b_inherit_handle: i32, dw_process_id: u32) -> isize;
+        fn CloseHandle(h_object: isize) -> i32;
+        fn QueryFullProcessImageNameW(h_proc: isize, dw_flags: u32, lp_exe_name: *mut u16, lpdw_size: *mut u32) -> i32;
+    }
+
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+
+    struct WinInfo {
+        pid: u32,
+    }
+
+    unsafe extern "system" fn enum_wnd(hwnd: isize, lparam: isize) -> i32 {
+        if IsWindowVisible(hwnd) == 0 {
+            return 1;
+        }
+        let len = GetWindowTextLengthW(hwnd);
+        if len == 0 {
+            return 1;
+        }
+        let mut title_buf = vec![0u16; (len + 1) as usize];
+        GetWindowTextW(hwnd, title_buf.as_mut_ptr(), len + 1);
+        let title = String::from_utf16_lossy(&title_buf[..len as usize]);
+        if title.trim().is_empty() {
+            return 1;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        if pid != 0 {
+            let list = &mut *(lparam as *mut Vec<WinInfo>);
+            list.push(WinInfo { pid });
+        }
+        1
+    }
+
+    fn exe_from_pid(pid: u32) -> Option<(String, String)> {
+        let h = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if h == 0 {
+            return None;
+        }
+        let mut buf = [0u16; 1024];
+        let mut size = buf.len() as u32;
+        let ok = unsafe { QueryFullProcessImageNameW(h, 0, buf.as_mut_ptr(), &mut size) };
+        unsafe { CloseHandle(h); }
+        if ok == 0 || size == 0 {
+            return None;
+        }
+        let path = String::from_utf16_lossy(&buf[..size as usize]);
+        let filename = path.rsplit(['\\', '/']).next()?.to_string();
+        Some((path, filename))
+    }
+
+    fn scan_start_menu(dir: PathBuf, out: &mut HashMap<String, Value>) {
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    scan_start_menu(p, out);
+                } else if p.extension().map(|e| e.eq_ignore_ascii_case("lnk")).unwrap_or(false) {
+                    let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                    let lower_stem = stem.to_lowercase();
+                    if lower_stem.starts_with("unins") || lower_stem.starts_with("uninstall") {
+                        continue;
+                    }
+                    let exe_name = format!("{stem}.exe");
+                    let key = exe_name.to_lowercase();
+                    if !out.contains_key(&key) {
+                        out.insert(key, json!({
+                            "n": stem,
+                            "e": exe_name,
+                            "r": 0
+                        }));
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn get_apps() -> Result<String, String> {
+        let mut map: HashMap<String, Value> = HashMap::new();
+        let mut wins: Vec<WinInfo> = Vec::new();
+
+        unsafe {
+            EnumWindows(enum_wnd, &mut wins as *mut _ as isize);
+        }
+
+        for w in wins {
+            if let Some((_, exe)) = exe_from_pid(w.pid) {
+                let key = exe.to_lowercase();
+                if key == "nyxar.exe" {
+                    continue;
+                }
+                let name = exe.strip_suffix(".exe").unwrap_or(&exe).to_string();
+                map.insert(key, json!({
+                    "n": name,
+                    "e": exe,
+                    "r": 1
+                }));
+            }
+        }
+
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            let p = PathBuf::from(appdata).join(r"Microsoft\Windows\Start Menu\Programs");
+            scan_start_menu(p, &mut map);
+        }
+        if let Some(progdata) = std::env::var_os("ProgramData") {
+            let p = PathBuf::from(progdata).join(r"Microsoft\Windows\Start Menu\Programs");
+            scan_start_menu(p, &mut map);
+        }
+
+        let mut items: Vec<Value> = map.into_values().collect();
+        items.retain(|i| i["e"].as_str().map(|e| !e.eq_ignore_ascii_case("nyxar.exe")).unwrap_or(false));
+        Ok(Value::Array(items).to_string())
+    }
+}
+
 /// Приложения для выбора «мимо VPN»: запущенные сейчас и из меню «Пуск».
 /// Возвращает JSON-массив вида [{"n":"Название","e":"app.exe","r":1}], r=1 значит «запущено».
 pub fn list_apps() -> Result<String, String> {
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
-        let script = r#"
-[Console]::OutputEncoding = [Text.Encoding]::UTF8
-$ErrorActionPreference = 'SilentlyContinue'
-$o = @{}
-Get-Process | Where-Object { $_.MainWindowTitle } | ForEach-Object {
-  $e = $_.ProcessName + '.exe'
-  $n = $null
-  try { $n = $_.MainModule.FileVersionInfo.ProductName } catch {}
-  if (-not $n) { $n = $_.ProcessName }
-  $o[$e.ToLower()] = @{ n = $n; e = $e; r = 1 }
-}
-$sh = New-Object -ComObject WScript.Shell
-$dirs = @("$env:ProgramData\Microsoft\Windows\Start Menu\Programs", "$env:APPDATA\Microsoft\Windows\Start Menu\Programs")
-foreach ($d in $dirs) {
-  Get-ChildItem -Path $d -Recurse -Filter *.lnk | ForEach-Object {
-    $t = $sh.CreateShortcut($_.FullName).TargetPath
-    if ($t -like '*.exe') {
-      $e = [IO.Path]::GetFileName($t)
-      if ($e -notmatch '^(unins|uninstall|setup|install)' -and -not $o.ContainsKey($e.ToLower())) {
-        $o[$e.ToLower()] = @{ n = $_.BaseName; e = $e; r = 0 }
-      }
-    }
-  }
-}
-$list = @($o.Values | ForEach-Object { [pscustomobject]$_ })
-ConvertTo-Json -InputObject $list -Compress
-"#;
-        let out = Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script])
-            .creation_flags(0x0800_0000)
-            .output()
-            .map_err(|e| format!("Не запустился PowerShell: {e}"))?;
-        let text = String::from_utf8_lossy(&out.stdout).trim().trim_start_matches('\u{feff}').to_string();
-        let v: Value = serde_json::from_str(&text).map_err(|_| "Не удалось получить список программ".to_string())?;
-        let mut items: Vec<Value> = match v {
-            Value::Array(a) => a,
-            Value::Object(_) => vec![v],
-            _ => vec![],
-        };
-        items.retain(|i| i["e"].as_str().map(|e| !e.eq_ignore_ascii_case("nyxar.exe")).unwrap_or(false));
-        Ok(Value::Array(items).to_string())
+        app_list::get_apps()
     }
     #[cfg(not(windows))]
     {
@@ -963,7 +1294,8 @@ pub fn apply_extras(cfg: &mut Value, apps: &[String], api_port: u16) {
         .collect();
     if !names.is_empty() {
         if let Some(rules) = cfg["route"]["rules"].as_array_mut() {
-            rules.insert(1, json!({ "process_name": names, "action": "route", "outbound": "direct" }));
+            let at = rules.iter().position(|r| r["action"] == "sniff").map(|p| p + 1).unwrap_or(1);
+            rules.insert(at, json!({ "process_name": names, "action": "route", "outbound": "direct" }));
         }
     }
     if api_port != 0 {
@@ -982,7 +1314,7 @@ pub fn apply_saver(cfg: &mut Value, on: bool) {
     }
     if let Some(rules) = cfg["route"]["rules"].as_array_mut() {
         // после sniff и hijack-dns, до остальных правил
-        let at = 2.min(rules.len());
+        let at = rules.iter().position(|r| r["action"] == "hijack-dns").map(|p| p + 1).unwrap_or(2);
         rules.insert(at, json!({ "domain_suffix": domains, "action": "reject" }));
     }
 }
@@ -1050,8 +1382,11 @@ pub fn tunnel_alive() -> bool {
 }
 
 pub fn build_config(outbound: Value, bypass_ru: bool, verbose: bool) -> Value {
-    let mut dns_rules: Vec<Value> = vec![];
+    let mut dns_rules: Vec<Value> = vec![
+        json!({ "query_type": ["AAAA"], "action": "reject", "method": "default" }),
+    ];
     let mut route_rules: Vec<Value> = vec![
+        json!({ "ip_version": 6, "action": "reject", "method": "default" }),
         json!({ "action": "sniff" }),
         json!({ "protocol": "dns", "action": "hijack-dns" }),
         json!({ "ip_is_private": true, "action": "route", "outbound": "direct" }),
@@ -1073,7 +1408,8 @@ pub fn build_config(outbound: Value, bypass_ru: bool, verbose: bool) -> Value {
                 { "tag": "local", "type": "udp", "server": "77.88.8.8" }
             ],
             "rules": dns_rules,
-            "final": "remote"
+            "final": "remote",
+            "strategy": "ipv4_only"
         },
         "inbounds": [{
             "type": "tun",
@@ -1189,7 +1525,10 @@ pub const SMART_MAX: usize = 5;
 /// Лучшие живые серверы для группы: по пингу, разные адреса.
 pub fn smart_candidates(servers: &[Server]) -> Vec<Server> {
     let mut alive: Vec<&Server> = servers.iter().filter(|x| x.ping.is_some()).collect();
-    alive.sort_by_key(|x| x.ping);
+    if alive.is_empty() {
+        alive = servers.iter().collect();
+    }
+    alive.sort_by_key(|x| x.ping.unwrap_or(u32::MAX));
     let mut out: Vec<Server> = Vec::new();
     for sv in alive {
         // два сервера на одном адресе упадут вместе, резервом они не являются
@@ -1262,7 +1601,7 @@ pub fn smart_plan(
             rules.push(json!({ "ip_cidr": [cidr], "action": "route", "outbound": "direct" }));
             sing.push(json!({ "type": "socks", "tag": key, "server": "127.0.0.1", "server_port": port, "version": "5" }));
         } else {
-            let Ok(mut ob) = vless_outbound(&sv.link) else { continue };
+            let Ok(mut ob) = native_outbound(&sv.link) else { continue };
             ob["tag"] = json!(key);
             sing.push(ob);
         }
@@ -1312,8 +1651,9 @@ pub fn smart_config(plan: &SmartPlan, bypass_ru: bool, verbose: bool) -> Value {
         }
     }
     if let Some(rules) = cfg["route"]["rules"].as_array_mut() {
+        let at = rules.iter().position(|r| r["action"] == "sniff").map(|p| p + 1).unwrap_or(1);
         for (i, r) in plan.rules.iter().enumerate() {
-            rules.insert(1 + i, r.clone());
+            rules.insert(at + i, r.clone());
         }
     }
     cfg
@@ -1378,7 +1718,10 @@ fn launch_core(core: &std::path::Path, core_dir: &std::path::Path, dir: &std::pa
     Ok(child)
 }
 
+static CORE_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub fn start_core(s: &Settings) -> Result<(Child, String, String), String> {
+    let _guard = CORE_MUTEX.lock().ok();
     let core = core_path()?;
     let core_dir = core.parent().map(|p| p.to_path_buf()).unwrap_or_else(base_dir);
     let dir = data_dir();
@@ -1417,13 +1760,14 @@ pub fn start_core(s: &Settings) -> Result<(Child, String, String), String> {
         start_xray(&core_dir, &plan.xray_cfg, port)?;
         let mut cfg = build_config(plan.outbound, s.bypass_ru, s.verbose);
         if let Some(rules) = cfg["route"]["rules"].as_array_mut() {
+            let at = rules.iter().position(|r| r["action"] == "sniff").map(|p| p + 1).unwrap_or(1);
             for (i, r) in plan.rules.into_iter().enumerate() {
-                rules.insert(1 + i, r); // сразу после sniff
+                rules.insert(at + i, r); // сразу после sniff
             }
         }
         cfg
     } else {
-        build_config(vless_outbound(&srv.link)?, s.bypass_ru, s.verbose)
+        build_config(native_outbound(&srv.link)?, s.bypass_ru, s.verbose)
     };
     let child = launch_core(&core, &core_dir, &dir, cfg, s)?;
     let key = srv.key();
@@ -1560,6 +1904,7 @@ mod win {
 
 /// Мягкая остановка: Ctrl+C и ожидание до 4 секунд, потом принудительно.
 pub fn stop_core(child: &mut Option<Child>) {
+    let _guard = CORE_MUTEX.lock().ok();
     // Если процесса sing-box нет, xray не трогаем: он мог быть только что запущен новым подключением.
     let Some(mut c) = child.take() else { return };
     #[cfg(windows)]
@@ -1789,10 +2134,13 @@ mod tests {
         let o = vless_outbound(LINK).unwrap();
         let on = build_config(o.clone(), true, false);
         let off = build_config(o, false, false);
-        assert_eq!(on["route"]["rules"].as_array().unwrap().len(), 4);
-        assert_eq!(off["route"]["rules"].as_array().unwrap().len(), 3);
-        assert!(on["dns"]["rules"].as_array().unwrap().len() == 1);
-        assert!(off["dns"]["rules"].as_array().unwrap().is_empty());
+        assert_eq!(on["route"]["rules"].as_array().unwrap().len(), 5);
+        assert_eq!(off["route"]["rules"].as_array().unwrap().len(), 4);
+        assert_eq!(on["dns"]["rules"].as_array().unwrap().len(), 2);
+        assert_eq!(off["dns"]["rules"].as_array().unwrap().len(), 1);
+        assert_eq!(on["dns"]["strategy"], "ipv4_only");
+        assert_eq!(on["route"]["rules"][0]["ip_version"], 6);
+        assert_eq!(on["route"]["rules"][0]["action"], "reject");
     }
 
     #[test]
@@ -1800,9 +2148,10 @@ mod tests {
         let mut cfg = build_config(json!({"type":"direct","tag":"proxy"}), true, false);
         apply_extras(&mut cfg, &["game.exe".into(), "  ".into(), "\"Steam.exe\"".into()], 9090);
         let rules = cfg["route"]["rules"].as_array().unwrap();
-        assert_eq!(rules[0]["action"], "sniff");
-        assert_eq!(rules[1]["process_name"], json!(["game.exe", "Steam.exe"]));
-        assert_eq!(rules[1]["outbound"], "direct");
+        assert_eq!(rules[0]["ip_version"], 6);
+        assert_eq!(rules[1]["action"], "sniff");
+        assert_eq!(rules[2]["process_name"], json!(["game.exe", "Steam.exe"]));
+        assert_eq!(rules[2]["outbound"], "direct");
         assert_eq!(cfg["experimental"]["clash_api"]["external_controller"], "127.0.0.1:9090");
     }
 
@@ -1839,9 +2188,50 @@ mod tests {
     }
 
     #[test]
-    fn extracts_only_vless_links() {
-        let text = format!("vmess://abc\n{LINK}\n\ntrojan://x\n");
-        assert_eq!(extract_links(&text), vec![LINK.to_string()]);
+    fn extracts_supported_links() {
+        let text = format!("vmess://abc\n{LINK}\n\ntrojan://pass@trojan.com:443\n");
+        assert_eq!(extract_links(&text), vec![LINK.to_string(), "trojan://pass@trojan.com:443".to_string()]);
+    }
+
+    #[test]
+    fn parses_trojan_and_builds_outbound() {
+        let link = "trojan://secret123@example.org:443?sni=sni.example.com&type=ws&path=%2Fws#MyTrojan";
+        let s = parse_server(link).unwrap();
+        assert_eq!(s.name, "MyTrojan");
+        assert_eq!(s.port, 443);
+        assert!(link_supported(link).is_ok());
+        let ob = native_outbound(link).unwrap();
+        assert_eq!(ob["type"], "trojan");
+        assert_eq!(ob["password"], "secret123");
+        assert_eq!(ob["tls"]["server_name"], "sni.example.com");
+        assert_eq!(ob["transport"]["type"], "ws");
+        assert_eq!(ob["transport"]["path"], "/ws");
+    }
+
+    #[test]
+    fn parses_hysteria2_and_builds_outbound() {
+        let link = "hysteria2://pass456@hy2.example.org:443?sni=sni.hy2.com&insecure=1&obfs=salamander&obfs-password=secret#MyHy2";
+        let s = parse_server(link).unwrap();
+        assert_eq!(s.name, "MyHy2");
+        assert!(link_supported(link).is_ok());
+        let ob = native_outbound(link).unwrap();
+        assert_eq!(ob["type"], "hysteria2");
+        assert_eq!(ob["password"], "pass456");
+        assert_eq!(ob["tls"]["server_name"], "sni.hy2.com");
+        assert_eq!(ob["tls"]["insecure"], true);
+        assert_eq!(ob["obfs"]["type"], "salamander");
+        assert_eq!(ob["obfs"]["password"], "secret");
+    }
+
+    #[test]
+    fn ipv6_is_blocked_in_dns_and_routing() {
+        let o = vless_outbound(LINK).unwrap();
+        let cfg = build_config(o, true, false);
+        assert_eq!(cfg["dns"]["strategy"], "ipv4_only");
+        let dns_rules = cfg["dns"]["rules"].as_array().unwrap();
+        assert!(dns_rules.iter().any(|r| r["query_type"] == json!(["AAAA"]) && r["action"] == "reject"));
+        let route_rules = cfg["route"]["rules"].as_array().unwrap();
+        assert!(route_rules.iter().any(|r| r["ip_version"] == 6 && r["action"] == "reject"));
     }
 
     #[test]
@@ -1888,11 +2278,12 @@ mod tests {
         let d = cfg["dns"]["rules"].as_array().unwrap();
         assert_eq!(d[0]["action"], "reject");
         let r = cfg["route"]["rules"].as_array().unwrap();
-        assert_eq!(r[0]["action"], "sniff");
-        assert_eq!(r[2]["action"], "reject");
+        assert_eq!(r[0]["ip_version"], 6);
+        assert_eq!(r[1]["action"], "sniff");
+        assert_eq!(r[3]["action"], "reject");
         let mut off = build_config(json!({"type":"direct","tag":"proxy"}), true, false);
         apply_saver(&mut off, false);
-        assert!(off["route"]["rules"].as_array().unwrap().iter().all(|x| x["action"] != "reject"));
+        assert!(off["route"]["rules"].as_array().unwrap().iter().all(|x| x["action"] != "reject" || x["ip_version"] == 6));
     }
 
     #[test]

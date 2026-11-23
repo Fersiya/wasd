@@ -63,6 +63,15 @@ object Engine {
 
     // ───────────────────── разбор ссылок ─────────────────────
 
+    private class ParsedLink(
+        val scheme: String,
+        val user: String,
+        val host: String,
+        val port: Int,
+        val params: Map<String, String>,
+        val name: String,
+    )
+
     private class Vless(
         val uuid: String,
         val host: String,
@@ -98,18 +107,24 @@ object Engine {
             s
         }
 
-    private fun parseVless(link: String): Vless? {
+    private fun parseLink(link: String): ParsedLink? {
         val l = link.trim()
-        if (!l.startsWith("vless://")) return null
-        var rest = l.removePrefix("vless://")
+        val scheme = when {
+            l.startsWith("vless://") -> "vless"
+            l.startsWith("trojan://") -> "trojan"
+            l.startsWith("hysteria2://") -> "hysteria2"
+            l.startsWith("hy2://") -> "hy2"
+            else -> return null
+        }
+        val prefixLen = scheme.length + 3
+        var rest = l.substring(prefixLen)
         val frag = rest.substringAfter('#', "")
         rest = rest.substringBefore('#')
         val query = rest.substringAfter('?', "")
         rest = rest.substringBefore('?')
         val at = rest.lastIndexOf('@')
-        if (at < 0) return null
-        val uuid = percentDecode(rest.substring(0, at))
-        val hostPort = rest.substring(at + 1).trimEnd('/')
+        val user = if (at >= 0) percentDecode(rest.substring(0, at)) else ""
+        val hostPort = if (at >= 0) rest.substring(at + 1).trimEnd('/') else rest.trimEnd('/')
         var host: String
         var port = 443
         if (hostPort.startsWith("[")) {
@@ -133,12 +148,18 @@ object Engine {
             if (pair.isEmpty()) continue
             params[formDecode(pair.substringBefore('='))] = formDecode(pair.substringAfter('=', ""))
         }
-        return Vless(uuid, host, port, params, percentDecode(frag).trim())
+        return ParsedLink(scheme, user, host, port, params, percentDecode(frag).trim())
+    }
+
+    private fun parseVless(link: String): Vless? {
+        val p = parseLink(link) ?: return null
+        if (p.scheme != "vless") return null
+        return Vless(p.user, p.host, p.port, p.params, p.name)
     }
 
     fun parseServer(link: String): Server? {
-        val v = parseVless(link) ?: return null
-        return Server(v.name.ifEmpty { v.host }, v.host, v.port, link.trim())
+        val p = parseLink(link) ?: return null
+        return Server(p.name.ifEmpty { p.host }, p.host, p.port, link.trim())
     }
 
     /** Запись-пустышка: информация о трафике/сроке, заглушка, адрес-заглушка. */
@@ -158,7 +179,7 @@ object Engine {
     }
 
     private fun decodeMaybeB64(text: String): String {
-        if (text.contains("vless://")) return text
+        if (text.contains("vless://") || text.contains("trojan://") || text.contains("hysteria2://") || text.contains("hy2://")) return text
         val compact = text.filterNot { it.isWhitespace() }
         for (flags in intArrayOf(Base64.DEFAULT, Base64.URL_SAFE)) {
             try {
@@ -171,7 +192,9 @@ object Engine {
     }
 
     private fun extractLinks(text: String): List<String> =
-        decodeMaybeB64(text).lines().map { it.trim() }.filter { it.startsWith("vless://") }
+        decodeMaybeB64(text).lines().map { it.trim() }.filter {
+            it.startsWith("vless://") || it.startsWith("trojan://") || it.startsWith("hysteria2://") || it.startsWith("hy2://")
+        }
 
     private fun download(url: String, ua: String): String {
         val c = URL(url).openConnection() as HttpURLConnection
@@ -187,17 +210,17 @@ object Engine {
         }
     }
 
-    /** Принимает vless://, несколько ссылок или URL подписки. */
+    /** Принимает vless://, trojan://, hysteria2://, несколько ссылок или URL подписки. */
     fun fetchLinks(src: String): List<String> {
         val s = src.trim()
         if (s.isEmpty()) throw NyxarException("Ссылка не задана: вставь её в поле ниже")
         if (!(s.startsWith("http://") || s.startsWith("https://"))) {
             val links = extractLinks(s)
-            if (links.isEmpty()) throw NyxarException("Не нашёл ни одной ссылки vless://")
+            if (links.isEmpty()) throw NyxarException("Не нашёл ни одной рабочей ссылки (vless://, trojan://, hysteria2://)")
             return links
         }
         val start = goodUa % USER_AGENTS.size
-        var lastErr = "Не нашёл ни одной ссылки vless://"
+        var lastErr = "Не нашёл ни одной рабочей ссылки (vless://, trojan://, hysteria2://)"
         var stubName: String? = null
         for (i in USER_AGENTS.indices) {
             val idx = (start + i) % USER_AGENTS.size
@@ -265,11 +288,18 @@ object Engine {
 
     /** Имя для SNI, если сервер работает поверх TLS или Reality (иначе рукопожатие не имеет смысла). */
     internal fun tlsName(link: String): String? {
-        val v = parseVless(link) ?: return null
-        if (v.params["security"] != "tls" && v.params["security"] != "reality") return null
-        val name = (v.params["sni"] ?: v.params["serverName"]).orEmpty().ifEmpty { v.host }
-        // для IP-адреса без SNI рукопожатие смысла не имеет
-        return if (Regex("^[0-9.]+$").matches(name) || name.contains(':')) null else name
+        val p = parseLink(link) ?: return null
+        val sni = when (p.scheme) {
+            "vless" -> {
+                if (p.params["security"] != "tls" && p.params["security"] != "reality") return null
+                (p.params["sni"] ?: p.params["serverName"]).orEmpty().ifEmpty { p.host }
+            }
+            "trojan" -> {
+                (p.params["sni"] ?: p.params["peer"] ?: p.params["host"]).orEmpty().ifEmpty { p.host }
+            }
+            else -> return null
+        }
+        return if (Regex("^[0-9.]+$").matches(sni) || sni.contains(':')) null else sni
     }
 
     private val trustAll: javax.net.ssl.SSLSocketFactory by lazy {
@@ -301,7 +331,34 @@ object Engine {
             null
         }
 
+    /** UDP-проверка для QUIC / Hysteria 2: отправляем запрос версии QUIC (RFC 9000). */
+    private fun quicPing(host: String, port: Int): Int? =
+        try {
+            val addr = InetSocketAddress(host, port)
+            val sock = java.net.DatagramSocket()
+            sock.soTimeout = 1500
+            val t = System.nanoTime()
+            val buf = ByteArray(1200)
+            buf[0] = 0xc0.toByte() // Long header
+            buf[5] = 8.toByte()    // DCID len
+            System.arraycopy(byteArrayOf(1, 2, 3, 4, 5, 6, 7, 8), 0, buf, 6, 8)
+            buf[14] = 8.toByte()   // SCID len
+            System.arraycopy(byteArrayOf(8, 7, 6, 5, 4, 3, 2, 1), 0, buf, 15, 8)
+            val packet = java.net.DatagramPacket(buf, buf.size, addr)
+            sock.send(packet)
+            val resp = java.net.DatagramPacket(ByteArray(1500), 1500)
+            sock.receive(resp)
+            sock.close()
+            ((System.nanoTime() - t) / 1_000_000).toInt().coerceAtLeast(1)
+        } catch (_: Exception) {
+            null
+        }
+
     private fun probe(s: Server): Int? {
+        val p = parseLink(s.link)
+        if (p?.scheme == "hysteria2" || p?.scheme == "hy2") {
+            return quicPing(s.host, s.port)
+        }
         val sni = tlsName(s.link) ?: return tcpPing(s.host, s.port)
         val a = tlsPing(s.host, s.port, sni)
         val b = tlsPing(s.host, s.port, sni)
@@ -423,6 +480,94 @@ object Engine {
         return out
     }
 
+    private fun trojanOutbound(link: String): JSONObject {
+        val u = parseLink(link) ?: throw NyxarException("Неверная ссылка trojan://")
+        if (u.scheme != "trojan") throw NyxarException("Нужна ссылка trojan://")
+        if (u.user.isEmpty()) throw NyxarException("В ссылке нет пароля Trojan")
+        val q = u.params
+        fun g(k: String) = q[k] ?: ""
+
+        val sni = g("sni").ifEmpty { g("peer").ifEmpty { g("host").ifEmpty { u.host } } }
+        val fp = g("fp").ifEmpty { "chrome" }
+
+        val tls = jo(
+            "enabled" to true,
+            "server_name" to sni,
+            "utls" to jo("enabled" to true, "fingerprint" to fp),
+        )
+        if (g("alpn").isNotEmpty()) tls.put("alpn", ja(g("alpn").split(',')))
+        if (g("allowInsecure") in listOf("1", "true") || g("insecure") in listOf("1", "true")) {
+            tls.put("insecure", true)
+        }
+
+        val out = jo(
+            "type" to "trojan",
+            "tag" to "proxy",
+            "server" to u.host,
+            "server_port" to u.port,
+            "password" to u.user,
+            "tls" to tls,
+        )
+
+        val path = g("path").ifEmpty { "/" }
+        when (val type = g("type")) {
+            "", "tcp" -> {}
+            "ws" -> {
+                val t = jo("type" to "ws", "path" to path)
+                if (g("host").isNotEmpty()) t.put("headers", jo("Host" to g("host")))
+                out.put("transport", t)
+            }
+            "grpc" -> out.put("transport", jo("type" to "grpc", "service_name" to g("serviceName")))
+            "httpupgrade" -> {
+                val t = jo("type" to "httpupgrade", "path" to path)
+                if (g("host").isNotEmpty()) t.put("host", g("host"))
+                out.put("transport", t)
+            }
+            else -> throw NyxarException("Транспорт $type не поддерживается для Trojan")
+        }
+        return out
+    }
+
+    private fun hysteria2Outbound(link: String): JSONObject {
+        val u = parseLink(link) ?: throw NyxarException("Неверная ссылка hysteria2://")
+        if (u.scheme != "hysteria2" && u.scheme != "hy2") throw NyxarException("Нужна ссылка hysteria2:// или hy2://")
+        val q = u.params
+        fun g(k: String) = q[k] ?: ""
+        val password = u.user.ifEmpty { g("auth") }
+        if (password.isEmpty()) throw NyxarException("В ссылке нет пароля Hysteria2")
+
+        val sni = g("sni").ifEmpty { g("peer").ifEmpty { u.host } }
+        val tls = jo(
+            "enabled" to true,
+            "server_name" to sni,
+        )
+        if (g("insecure") in listOf("1", "true")) tls.put("insecure", true)
+        if (g("alpn").isNotEmpty()) tls.put("alpn", ja(g("alpn").split(',')))
+
+        val out = jo(
+            "type" to "hysteria2",
+            "tag" to "proxy",
+            "server" to u.host,
+            "server_port" to u.port,
+            "password" to password,
+            "tls" to tls,
+        )
+        if (g("obfs").isNotEmpty()) {
+            out.put("obfs", jo("type" to g("obfs"), "password" to g("obfs-password")))
+        }
+        return out
+    }
+
+    fun nativeOutbound(link: String): JSONObject {
+        val l = link.trim()
+        return when {
+            l.startsWith("vless://") -> vlessOutbound(l)
+            l.startsWith("trojan://") -> trojanOutbound(l)
+            l.startsWith("hysteria2://") || l.startsWith("hy2://") -> hysteria2Outbound(l)
+            else -> throw NyxarException("Неподдерживаемый протокол ссылки")
+        }
+    }
+
     // ───────────────────── Xray (xhttp и др.) ─────────────────────
     // sing-box не умеет xhttp и VLESS encryption. Такие серверы обслуживает Xray-core:
     // sing-box (TUN) -> socks 127.0.0.1:порт -> xray -> сервер.
@@ -518,14 +663,14 @@ object Engine {
 
     /** null, если ссылку тянет sing-box или Xray; иначе причина отказа. */
     fun linkError(link: String): String? {
-        if (runCatching { vlessOutbound(link) }.isSuccess) return null
+        if (runCatching { nativeOutbound(link) }.isSuccess) return null
         val viaXray = runCatching { xrayOutbound(link) }
         if (viaXray.isSuccess) return null
         return viaXray.exceptionOrNull()?.message ?: "ошибка"
     }
 
     fun needsXray(link: String): Boolean =
-        runCatching { vlessOutbound(link) }.isFailure && runCatching { xrayOutbound(link) }.isSuccess
+        runCatching { nativeOutbound(link) }.isFailure && runCatching { xrayOutbound(link) }.isSuccess
 
     fun xrayConfig(outbound: JSONObject, port: Int, verbose: Boolean): JSONObject = jo(
         "log" to jo("loglevel" to (if (verbose) "info" else "warning")),
@@ -557,8 +702,11 @@ object Engine {
         java.net.ServerSocket(0, 0, java.net.InetAddress.getByName("127.0.0.1")).use { it.localPort }
 
     fun buildConfig(outbound: JSONObject, bypassRu: Boolean, verbose: Boolean, logPath: String, saver: Boolean = false, apiPort: Int = 0): JSONObject {
-        val dnsRules = ArrayList<Any?>()
+        val dnsRules = arrayListOf<Any?>(
+            jo("query_type" to ja(listOf("AAAA")), "action" to "reject", "method" to "default")
+        )
         val routeRules = arrayListOf<Any?>(
+            jo("ip_version" to 6, "action" to "reject", "method" to "default"),
             jo("action" to "sniff"),
             jo("protocol" to "dns", "action" to "hijack-dns"),
             jo("ip_is_private" to true, "action" to "route", "outbound" to "direct"),
@@ -570,7 +718,9 @@ object Engine {
         if (saver) {
             // отказ на уровне DNS и сброс соединения: реклама и трекеры не загружаются
             dnsRules.add(0, jo("domain_suffix" to ja(Saver.ADS), "action" to "reject"))
-            routeRules.add(2, jo("domain_suffix" to ja(Saver.ADS), "action" to "reject"))
+            val at = routeRules.indexOfFirst { (it as? JSONObject)?.optString("action") == "hijack-dns" }
+            val insertIdx = if (at >= 0) at + 1 else 2
+            routeRules.add(insertIdx, jo("domain_suffix" to ja(Saver.ADS), "action" to "reject"))
         }
         val cfg = jo(
             "log" to jo(
@@ -579,6 +729,7 @@ object Engine {
                 "output" to logPath,
             ),
             "dns" to jo(
+                "strategy" to "ipv4_only",
                 "servers" to ja(
                     listOf(
                         jo("tag" to "remote", "type" to "https", "server" to "1.1.1.1", "detour" to "proxy"),
@@ -595,6 +746,7 @@ object Engine {
                         "tag" to "tun-in",
                         "address" to ja(listOf("172.19.0.1/30", "fdfe:dcba:9876::1/126")),
                         "auto_route" to true,
+                        "strict_route" to true,
                         "stack" to "mixed",
                     ),
                 ),
@@ -630,7 +782,7 @@ object Engine {
             )
             return Prepared(srv, buildConfig(socks, prefs.bypassRu, prefs.verbose, logPath, prefs.saver, api), xcfg, port, api)
         }
-        val cfg = buildConfig(vlessOutbound(srv.link), prefs.bypassRu, prefs.verbose, logPath, prefs.saver, api)
+        val cfg = buildConfig(nativeOutbound(srv.link), prefs.bypassRu, prefs.verbose, logPath, prefs.saver, api)
         return Prepared(srv, cfg, apiPort = api)
     }
 }

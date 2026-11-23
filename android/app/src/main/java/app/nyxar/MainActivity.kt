@@ -308,7 +308,7 @@ class MainActivity : Activity() {
 
         linkInput = EditText(this).apply {
             setText(prefs.link)
-            hint = "vless://… или адрес подписки"
+            hint = "vless://, trojan://, hy2:// или подписка"
             setHintTextColor(MUTED)
             setTextColor(TEXT)
             textSize = 13f
@@ -890,7 +890,7 @@ class MainActivity : Activity() {
         prefs.link = link
         servers = emptyList()
         if (link.isEmpty()) {
-            VpnState.set(Status.ERROR, error = "Вставь ссылку vless:// или адрес подписки.")
+            VpnState.set(Status.ERROR, error = "Вставь ссылку (vless, trojan, hy2) или адрес подписки.")
             renderServers()
             return
         }

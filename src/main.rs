@@ -30,8 +30,6 @@ use tray_icon::{
 };
 use wry::{WebContext, WebView, WebViewBuilder};
 
-/// Порт для проверки «уже запущено»: второй запуск просит первый показать окно.
-const SINGLE_PORT: u16 = 47631;
 /// Как часто проверять обновления.
 /// Как часто обновлять список серверов из подписки.
 const SUB_EVERY: Duration = Duration::from_secs(6 * 3600);
@@ -388,22 +386,33 @@ fn failover(proxy: &EventLoopProxy<UserEvent>, app: &mut App) {
 }
 
 fn restart(proxy: &EventLoopProxy<UserEvent>, app: &mut App) {
-    engine::stop_core(&mut app.child);
-    if app.st != St::Connecting {
-        begin_connect(proxy, app);
+    app.st = St::Connecting;
+    app.error.clear();
+    let mut old_child = app.child.take();
+    let p = proxy.clone();
+    let mut s = app.settings.clone();
+    if let Some(k) = &app.override_key {
+        s.server = k.clone();
     }
+    std::thread::spawn(move || {
+        engine::stop_core(&mut old_child);
+        let _ = p.send_event(UserEvent::Started(engine::start_core(&s)));
+    });
 }
 
 fn toggle_connection(proxy: &EventLoopProxy<UserEvent>, app: &mut App) {
-    if app.child.is_some() {
+    if app.child.is_some() || app.st == St::Connecting {
         app.usage.save(&engine::data_dir());
-        engine::stop_core(&mut app.child);
+        let mut old_child = app.child.take();
+        std::thread::spawn(move || {
+            engine::stop_core(&mut old_child);
+        });
         app.st = St::Off;
         app.override_key = None;
         app.connected_at = None;
         app.error.clear();
         maybe_auto_update(proxy, app);
-    } else if app.st != St::Connecting {
+    } else {
         if app.settings.link.trim().is_empty() {
             app.st = St::Error;
             app.error = "Сначала добавь ссылку или подписку в поле внизу окна.".into();
@@ -446,25 +455,100 @@ fn maybe_auto_update(proxy: &EventLoopProxy<UserEvent>, app: &mut App) {
     }
 }
 
-/// Если Nyxar уже запущен, просим его показать окно и выходим.
-fn single_instance(proxy: &EventLoopProxy<UserEvent>) {
-    if let Ok(mut s) = TcpStream::connect(("127.0.0.1", SINGLE_PORT)) {
-        let _ = s.set_read_timeout(Some(Duration::from_millis(800)));
-        let _ = s.write_all(b"show");
-        let mut buf = [0u8; 5];
-        if s.read_exact(&mut buf).is_ok() && &buf == b"nyxar" {
+#[cfg(windows)]
+mod ipc {
+    use std::{ffi::OsStr, io::Write, os::windows::ffi::OsStrExt, ptr};
+
+    const MUTEX_NAME: &str = "Local\\Nyxar_SingleInstance_Mutex";
+    const PIPE_NAME: &str = "\\\\.\\pipe\\Nyxar_SingleInstance_Pipe";
+    const ERROR_ALREADY_EXISTS: u32 = 183;
+    const ERROR_PIPE_CONNECTED: u32 = 535;
+    const PIPE_ACCESS_DUPLEX: u32 = 0x00000003;
+    const PIPE_TYPE_MESSAGE: u32 = 0x00000004;
+    const PIPE_READMODE_MESSAGE: u32 = 0x00000002;
+    const PIPE_WAIT: u32 = 0x00000000;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateMutexW(attrs: *mut std::ffi::c_void, initial_owner: i32, name: *const u16) -> isize;
+        fn GetLastError() -> u32;
+        fn CreateNamedPipeW(
+            name: *const u16,
+            open_mode: u32,
+            pipe_mode: u32,
+            max_instances: u32,
+            out_buf: u32,
+            in_buf: u32,
+            timeout: u32,
+            attrs: *mut std::ffi::c_void,
+        ) -> isize;
+        fn ConnectNamedPipe(h_pipe: isize, overlapped: *mut std::ffi::c_void) -> i32;
+        fn DisconnectNamedPipe(h_pipe: isize) -> i32;
+        fn ReadFile(
+            h_file: isize,
+            buf: *mut u8,
+            len: u32,
+            read: *mut u32,
+            overlapped: *mut std::ffi::c_void,
+        ) -> i32;
+        fn CloseHandle(h: isize) -> i32;
+    }
+
+    fn wide(s: &str) -> Vec<u16> {
+        OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+    }
+
+    pub fn ensure_single_instance(on_show: impl Fn() + Send + 'static) -> Option<isize> {
+        let m_name = wide(MUTEX_NAME);
+        let mutex = unsafe { CreateMutexW(ptr::null_mut(), 0, m_name.as_ptr()) };
+        if mutex == 0 {
+            return None;
+        }
+        if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+            for _ in 0..10 {
+                if let Ok(mut f) = std::fs::OpenOptions::new().write(true).open(PIPE_NAME) {
+                    let _ = f.write_all(b"show");
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
             std::process::exit(0);
         }
-    }
-    if let Ok(listener) = TcpListener::bind(("127.0.0.1", SINGLE_PORT)) {
-        let p = proxy.clone();
+
         std::thread::spawn(move || {
-            for conn in listener.incoming().flatten() {
-                let mut c = conn;
-                let _ = c.write_all(b"nyxar");
-                let _ = p.send_event(UserEvent::Show);
+            let p_name = wide(PIPE_NAME);
+            loop {
+                let h_pipe = unsafe {
+                    CreateNamedPipeW(
+                        p_name.as_ptr(),
+                        PIPE_ACCESS_DUPLEX,
+                        PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+                        1,
+                        512,
+                        512,
+                        0,
+                        ptr::null_mut(),
+                    )
+                };
+                if h_pipe == -1 || h_pipe == 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    continue;
+                }
+                let connected = unsafe { ConnectNamedPipe(h_pipe, ptr::null_mut()) };
+                if connected != 0 || unsafe { GetLastError() } == ERROR_PIPE_CONNECTED {
+                    let mut buf = [0u8; 16];
+                    let mut read = 0u32;
+                    let ok = unsafe { ReadFile(h_pipe, buf.as_mut_ptr(), buf.len() as u32, &mut read, ptr::null_mut()) };
+                    if ok != 0 && &buf[..read as usize] == b"show" {
+                        on_show();
+                    }
+                    unsafe { DisconnectNamedPipe(h_pipe); }
+                }
+                unsafe { CloseHandle(h_pipe); }
             }
         });
+
+        Some(mutex)
     }
 }
 
@@ -473,7 +557,14 @@ fn single_instance(proxy: &EventLoopProxy<UserEvent>) {
 fn main() {
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
-    single_instance(&proxy);
+
+    #[cfg(windows)]
+    let _mutex = {
+        let p = proxy.clone();
+        ipc::ensure_single_instance(move || {
+            let _ = p.send_event(UserEvent::Show);
+        })
+    };
 
     {
         let p = proxy.clone();
@@ -867,6 +958,7 @@ fn main() {
                         app.update_failed = false;
                         start_update_install(&proxy, &mut app);
                     }
+                    "ready" => {}
                     _ => {}
                 }
                 sync(&app, &tray, &status_item, &toggle_item, &win);
@@ -892,6 +984,15 @@ fn main() {
             }
 
             Event::UserEvent(UserEvent::Started(result)) => {
+                if app.st == St::Off {
+                    if let Ok((mut c, _, _)) = result {
+                        std::thread::spawn(move || {
+                            engine::stop_core(&mut Some(c));
+                        });
+                    }
+                    sync(&app, &tray, &status_item, &toggle_item, &win);
+                    return;
+                }
                 match result {
                     Ok((c, name, key)) => {
                         engine::stop_core(&mut app.child); // на случай гонки двух подключений
