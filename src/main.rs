@@ -155,6 +155,11 @@ impl App {
             "bypass_apps": self.settings.bypass_apps,
             "favs": self.settings.favorites,
             "saver": self.settings.saver,
+            "ai_unlock": self.settings.ai_unlock,
+            "fragment": self.settings.fragment,
+            "kill_switch": self.settings.kill_switch,
+            "custom_direct": self.settings.custom_direct,
+            "custom_proxy": self.settings.custom_proxy,
             "limit_mb": self.settings.limit_mb,
             "month_bytes": self.usage.total,
             "top_apps": self.usage.top(8).into_iter()
@@ -883,7 +888,48 @@ fn main() {
                                     notify(APP, &m);
                                 }
                             },
+                            "ai_unlock" => {
+                                app.settings.ai_unlock = on;
+                                engine::save_settings(&app.settings);
+                                if app.child.is_some() {
+                                    restart(&proxy, &mut app);
+                                }
+                            }
+                            "fragment" => {
+                                app.settings.fragment = on;
+                                engine::save_settings(&app.settings);
+                                if app.child.is_some() {
+                                    restart(&proxy, &mut app);
+                                }
+                            }
+                            "kill_switch" => {
+                                app.settings.kill_switch = on;
+                                engine::save_settings(&app.settings);
+                                if app.child.is_some() {
+                                    restart(&proxy, &mut app);
+                                }
+                            }
                             _ => {}
+                        }
+                    }
+                    "custom_rules" => {
+                        if let Some(direct) = v["direct"].as_array() {
+                            app.settings.custom_direct = direct.iter()
+                                .filter_map(|x| x.as_str())
+                                .map(|x| x.trim().to_string())
+                                .filter(|x| !x.is_empty())
+                                .collect();
+                        }
+                        if let Some(proxy_rules) = v["proxy"].as_array() {
+                            app.settings.custom_proxy = proxy_rules.iter()
+                                .filter_map(|x| x.as_str())
+                                .map(|x| x.trim().to_string())
+                                .filter(|x| !x.is_empty())
+                                .collect();
+                        }
+                        engine::save_settings(&app.settings);
+                        if app.child.is_some() {
+                            restart(&proxy, &mut app);
                         }
                     }
                     "save" => {
@@ -893,7 +939,7 @@ fn main() {
                             engine::stop_core(&mut app.child);
                             app.servers.clear();
                             app.st = St::Error;
-                            app.error = "Вставь ссылку vless:// или адрес подписки.".into();
+                            app.error = "Вставь ссылку vless://, trojan://, hysteria2://, ss:// или адрес подписки.".into();
                         } else {
                             refresh_servers(&proxy, &mut app);
                             restart(&proxy, &mut app);

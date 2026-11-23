@@ -55,6 +55,23 @@ object Engine {
         "2gis.com", "kinopoisk.dev",
     )
 
+    /** Домены AI сервисов (Gemini, Antigravity, ChatGPT, Claude) для принудительного пропуска через VPN */
+    val AI_DOMAINS = listOf(
+        "generativelanguage.googleapis.com",
+        "alkalimakersuite-pa.clients6.google.com",
+        "aistudio.google.com",
+        "deepmind.google",
+        "gemini.google.com",
+        "ai.google.dev",
+        "proactivebackend-pa.googleapis.com",
+        "openai.com",
+        "chatgpt.com",
+        "oaistatic.com",
+        "oaiusercontent.com",
+        "anthropic.com",
+        "claude.ai",
+    )
+
     /** Многие панели подписок отдают заглушку тем, кого не знают, поэтому пробуем несколько клиентов. */
     private val USER_AGENTS = listOf("v2rayNG/1.9.40", "Happ/2.0.0", "Hiddify/2.5.7", "v2rayN/7.4.0", "nyxar")
 
@@ -157,7 +174,82 @@ object Engine {
         return Vless(p.user, p.host, p.port, p.params, p.name)
     }
 
+    private fun decodeBase64Loose(s: String): String? {
+        val clean = s.trim().filterNot { it.isWhitespace() }
+        val rem = clean.length % 4
+        val padded = if (rem > 0) clean + "=".repeat(4 - rem) else clean
+        for (flags in intArrayOf(Base64.DEFAULT, Base64.URL_SAFE, Base64.NO_WRAP)) {
+            try {
+                val bytes = Base64.decode(padded, flags)
+                val str = String(bytes, Charsets.UTF_8)
+                if (str.isNotEmpty()) return str
+            } catch (_: Exception) {}
+        }
+        return null
+    }
+
+    fun parseShadowsocks(link: String): JSONObject {
+        val l = link.trim()
+        if (!l.startsWith("ss://")) throw NyxarException("Нужна ссылка ss://")
+        val rest = l.substring(5)
+        val body = rest.substringBefore('#')
+        val mainPart = body.substringBefore('?')
+
+        val at = mainPart.indexOf('@')
+        val (userInfo, hostPort) = if (at >= 0) {
+            val u = mainPart.substring(0, at)
+            val hp = mainPart.substring(at + 1)
+            val decodedUser = decodeBase64Loose(u) ?: u
+            Pair(decodedUser, hp)
+        } else {
+            val decoded = decodeBase64Loose(mainPart) ?: throw NyxarException("Не удалось декодировать base64 в ss://")
+            val dat = decoded.indexOf('@')
+            if (dat < 0) throw NyxarException("В ссылке ss:// нет @")
+            Pair(decoded.substring(0, dat), decoded.substring(dat + 1))
+        }
+
+        val colon = userInfo.indexOf(':')
+        if (colon < 0) throw NyxarException("В ссылке ss:// нет метода или пароля (method:password)")
+        val method = userInfo.substring(0, colon)
+        val password = userInfo.substring(colon + 1)
+
+        val cleanHp = hostPort.trimEnd('/')
+        val (host, port) = if (cleanHp.startsWith("[")) {
+            val end = cleanHp.indexOf(']')
+            if (end < 0) throw NyxarException("Неверный IPv6 в ss://")
+            val h = cleanHp.substring(1, end)
+            val p = cleanHp.substring(end + 1).removePrefix(":").toIntOrNull() ?: 8388
+            Pair(h, p)
+        } else {
+            val c = cleanHp.lastIndexOf(':')
+            if (c >= 0) {
+                Pair(cleanHp.substring(0, c), cleanHp.substring(c + 1).toIntOrNull() ?: 8388)
+            } else {
+                Pair(cleanHp, 8388)
+            }
+        }
+        if (host.isEmpty()) throw NyxarException("В ссылке ss:// нет адреса сервера")
+
+        return jo(
+            "type" to "shadowsocks",
+            "tag" to "proxy",
+            "server" to host,
+            "server_port" to port,
+            "method" to method,
+            "password" to password,
+        )
+    }
+
     fun parseServer(link: String): Server? {
+        val l = link.trim()
+        if (l.startsWith("ss://")) {
+            val ob = runCatching { parseShadowsocks(l) }.getOrNull() ?: return null
+            val host = ob.getString("server")
+            val port = ob.getInt("server_port")
+            val frag = l.substringAfter('#', "")
+            val name = if (frag.isNotEmpty()) percentDecode(frag).trim() else host
+            return Server(name.ifEmpty { host }, host, port, l)
+        }
         val p = parseLink(link) ?: return null
         return Server(p.name.ifEmpty { p.host }, p.host, p.port, link.trim())
     }
@@ -179,7 +271,7 @@ object Engine {
     }
 
     private fun decodeMaybeB64(text: String): String {
-        if (text.contains("vless://") || text.contains("trojan://") || text.contains("hysteria2://") || text.contains("hy2://")) return text
+        if (text.contains("vless://") || text.contains("trojan://") || text.contains("hysteria2://") || text.contains("hy2://") || text.contains("ss://")) return text
         val compact = text.filterNot { it.isWhitespace() }
         for (flags in intArrayOf(Base64.DEFAULT, Base64.URL_SAFE)) {
             try {
@@ -193,7 +285,7 @@ object Engine {
 
     private fun extractLinks(text: String): List<String> =
         decodeMaybeB64(text).lines().map { it.trim() }.filter {
-            it.startsWith("vless://") || it.startsWith("trojan://") || it.startsWith("hysteria2://") || it.startsWith("hy2://")
+            it.startsWith("vless://") || it.startsWith("trojan://") || it.startsWith("hysteria2://") || it.startsWith("hy2://") || it.startsWith("ss://")
         }
 
     private fun download(url: String, ua: String): String {
@@ -210,13 +302,13 @@ object Engine {
         }
     }
 
-    /** Принимает vless://, trojan://, hysteria2://, несколько ссылок или URL подписки. */
+    /** Принимает vless://, trojan://, hysteria2://, ss://, несколько ссылок или URL подписки. */
     fun fetchLinks(src: String): List<String> {
         val s = src.trim()
         if (s.isEmpty()) throw NyxarException("Ссылка не задана: вставь её в поле ниже")
         if (!(s.startsWith("http://") || s.startsWith("https://"))) {
             val links = extractLinks(s)
-            if (links.isEmpty()) throw NyxarException("Не нашёл ни одной рабочей ссылки (vless://, trojan://, hysteria2://)")
+            if (links.isEmpty()) throw NyxarException("Не нашёл ни одной рабочей ссылки (vless://, trojan://, hysteria2://, ss://)")
             return links
         }
         val start = goodUa % USER_AGENTS.size
@@ -564,6 +656,7 @@ object Engine {
             l.startsWith("vless://") -> vlessOutbound(l)
             l.startsWith("trojan://") -> trojanOutbound(l)
             l.startsWith("hysteria2://") || l.startsWith("hy2://") -> hysteria2Outbound(l)
+            l.startsWith("ss://") -> parseShadowsocks(l)
             else -> throw NyxarException("Неподдерживаемый протокол ссылки")
         }
     }
@@ -701,7 +794,19 @@ object Engine {
     private fun freePort(): Int =
         java.net.ServerSocket(0, 0, java.net.InetAddress.getByName("127.0.0.1")).use { it.localPort }
 
-    fun buildConfig(outbound: JSONObject, bypassRu: Boolean, verbose: Boolean, logPath: String, saver: Boolean = false, apiPort: Int = 0): JSONObject {
+    fun buildConfig(
+        outbound: JSONObject,
+        bypassRu: Boolean,
+        verbose: Boolean,
+        logPath: String,
+        saver: Boolean = false,
+        apiPort: Int = 0,
+        aiUnlock: Boolean = true,
+        fragment: Boolean = true,
+        killSwitch: Boolean = false,
+        customDirect: Set<String> = emptySet(),
+        customProxy: Set<String> = emptySet(),
+    ): JSONObject {
         val dnsRules = arrayListOf<Any?>(
             jo("query_type" to ja(listOf("AAAA")), "action" to "reject", "method" to "default")
         )
@@ -722,6 +827,43 @@ object Engine {
             val insertIdx = if (at >= 0) at + 1 else 2
             routeRules.add(insertIdx, jo("domain_suffix" to ja(Saver.ADS), "action" to "reject"))
         }
+        if (aiUnlock) {
+            dnsRules.add(jo("domain_suffix" to ja(AI_DOMAINS), "action" to "route", "server" to "remote"))
+            routeRules.add(jo("domain_suffix" to ja(AI_DOMAINS), "action" to "route", "outbound" to "proxy"))
+        }
+        if (customDirect.isNotEmpty()) {
+            val (domains, ips) = customDirect.map { it.trim() }.filter { it.isNotEmpty() }.partition { !it.contains('/') && !it.matches(Regex("^[0-9.:]+$")) }
+            if (domains.isNotEmpty()) {
+                dnsRules.add(jo("domain_suffix" to ja(domains), "action" to "route", "server" to "local"))
+                routeRules.add(jo("domain_suffix" to ja(domains), "action" to "route", "outbound" to "direct"))
+            }
+            if (ips.isNotEmpty()) {
+                routeRules.add(jo("ip_cidr" to ja(ips), "action" to "route", "outbound" to "direct"))
+            }
+        }
+        if (customProxy.isNotEmpty()) {
+            val (domains, ips) = customProxy.map { it.trim() }.filter { it.isNotEmpty() }.partition { !it.contains('/') && !it.matches(Regex("^[0-9.:]+$")) }
+            if (domains.isNotEmpty()) {
+                dnsRules.add(jo("domain_suffix" to ja(domains), "action" to "route", "server" to "remote"))
+                routeRules.add(jo("domain_suffix" to ja(domains), "action" to "route", "outbound" to "proxy"))
+            }
+            if (ips.isNotEmpty()) {
+                routeRules.add(jo("ip_cidr" to ja(ips), "action" to "route", "outbound" to "proxy"))
+            }
+        }
+        if (killSwitch) {
+            routeRules.add(jo("ip_is_private" to false, "action" to "route", "outbound" to "proxy"))
+        }
+
+        if (fragment) {
+            val tls = outbound.optJSONObject("tls")
+            if (tls != null) {
+                tls.put("fragment", true)
+                tls.put("record_fragment", true)
+                tls.put("fragment_fallback_delay", "500ms")
+            }
+        }
+
         val cfg = jo(
             "log" to jo(
                 "level" to (if (verbose) "info" else "warn"),
@@ -744,10 +886,16 @@ object Engine {
                     jo(
                         "type" to "tun",
                         "tag" to "tun-in",
-                        "address" to ja(listOf("172.19.0.1/30", "fdfe:dcba:9876::1/126")),
+                        "address" to ja(listOf("172.19.0.1/30")),
                         "auto_route" to true,
                         "strict_route" to true,
                         "stack" to "mixed",
+                    ),
+                    jo(
+                        "type" to "mixed",
+                        "tag" to "mixed-in",
+                        "listen" to "127.0.0.1",
+                        "listen_port" to 2080,
                     ),
                 ),
             ),
@@ -780,9 +928,19 @@ object Engine {
                 "type" to "socks", "tag" to "proxy",
                 "server" to "127.0.0.1", "server_port" to port, "version" to "5",
             )
-            return Prepared(srv, buildConfig(socks, prefs.bypassRu, prefs.verbose, logPath, prefs.saver, api), xcfg, port, api)
+            return Prepared(
+                srv,
+                buildConfig(
+                    socks, prefs.bypassRu, prefs.verbose, logPath, prefs.saver, api,
+                    prefs.aiUnlock, prefs.fragment, prefs.killSwitch, prefs.customDirect, prefs.customProxy,
+                ),
+                xcfg, port, api,
+            )
         }
-        val cfg = buildConfig(nativeOutbound(srv.link), prefs.bypassRu, prefs.verbose, logPath, prefs.saver, api)
+        val cfg = buildConfig(
+            nativeOutbound(srv.link), prefs.bypassRu, prefs.verbose, logPath, prefs.saver, api,
+            prefs.aiUnlock, prefs.fragment, prefs.killSwitch, prefs.customDirect, prefs.customProxy,
+        )
         return Prepared(srv, cfg, apiPort = api)
     }
 }

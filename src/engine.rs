@@ -27,6 +27,23 @@ pub const RU_DIRECT: &[&str] = &[
     "2gis.com", "kinopoisk.dev",
 ];
 
+/// Домены AI сервисов (Gemini, Antigravity, ChatGPT, Claude) для принудительного пропуска через VPN
+pub const AI_DOMAINS: &[&str] = &[
+    "generativelanguage.googleapis.com",
+    "alkalimakersuite-pa.clients6.google.com",
+    "aistudio.google.com",
+    "deepmind.google",
+    "gemini.google.com",
+    "ai.google.dev",
+    "proactivebackend-pa.googleapis.com",
+    "openai.com",
+    "chatgpt.com",
+    "oaistatic.com",
+    "oaiusercontent.com",
+    "anthropic.com",
+    "claude.ai",
+];
+
 // ───────────────────────── настройки ─────────────────────────
 
 fn d_auto() -> String {
@@ -77,6 +94,21 @@ pub struct Settings {
     /// Избранные серверы (ключи): в списке идут первыми
     #[serde(default)]
     pub favorites: Vec<String>,
+    /// Разблокировка Google AI, Antigravity, ChatGPT, Claude
+    #[serde(default = "d_true")]
+    pub ai_unlock: bool,
+    /// Обход блокировок TLS (ClientHello Fragmentation)
+    #[serde(default = "d_true")]
+    pub fragment: bool,
+    /// Блокировка всего трафика при обрыве VPN (Kill Switch)
+    #[serde(default)]
+    pub kill_switch: bool,
+    /// Пользовательские домены/подсети напрямую (мимо VPN)
+    #[serde(default)]
+    pub custom_direct: Vec<String>,
+    /// Пользовательские домены/подсети всегда через VPN
+    #[serde(default)]
+    pub custom_proxy: Vec<String>,
 }
 
 impl Default for Settings {
@@ -96,6 +128,11 @@ impl Default for Settings {
             saver: true,
             limit_mb: 0,
             favorites: Vec::new(),
+            ai_unlock: true,
+            fragment: true,
+            kill_switch: false,
+            custom_direct: Vec::new(),
+            custom_proxy: Vec::new(),
         }
     }
 }
@@ -353,6 +390,7 @@ fn decode_maybe_b64(text: &str) -> String {
         || text.contains("trojan://")
         || text.contains("hysteria2://")
         || text.contains("hy2://")
+        || text.contains("ss://")
     {
         return text.to_string();
     }
@@ -403,6 +441,7 @@ fn extract_links(text: &str) -> Vec<String> {
                 || l.starts_with("trojan://")
                 || l.starts_with("hysteria2://")
                 || l.starts_with("hy2://")
+                || l.starts_with("ss://")
         })
         .map(String::from)
         .collect()
@@ -456,7 +495,7 @@ fn fetch_links_net(src: &str) -> Result<Vec<String>, String> {
     if !(src.starts_with("http://") || src.starts_with("https://")) {
         let links = extract_links(src);
         return if links.is_empty() {
-            Err("Не нашёл ни одной рабочей ссылки (vless://, trojan://, hysteria2://)".into())
+            Err("Не нашёл ни одной рабочей ссылки (vless://, trojan://, hysteria2://, ss://)".into())
         } else {
             Ok(links)
         };
@@ -464,7 +503,7 @@ fn fetch_links_net(src: &str) -> Result<Vec<String>, String> {
 
     let start = GOOD_UA.load(Ordering::Relaxed) % USER_AGENTS.len();
     let mut stub: Option<String> = None;
-    let mut last_err = String::from("Не нашёл ни одной рабочей ссылки (vless://, trojan://, hysteria2://)");
+    let mut last_err = String::from("Не нашёл ни одной рабочей ссылки (vless://, trojan://, hysteria2://, ss://)");
     for i in 0..USER_AGENTS.len() {
         let idx = (start + i) % USER_AGENTS.len();
         match download_subscription(src, USER_AGENTS[idx]) {
@@ -496,7 +535,25 @@ fn fetch_links_net(src: &str) -> Result<Vec<String>, String> {
 }
 
 pub fn parse_server(link: &str) -> Option<Server> {
-    let u = Url::parse(link.trim()).ok()?;
+    let l = link.trim();
+    if l.starts_with("ss://") {
+        let ob = parse_shadowsocks(l).ok()?;
+        let host = ob["server"].as_str()?.to_string();
+        let port = ob["server_port"].as_u64()? as u16;
+        let name = l
+            .split_once('#')
+            .map(|(_, f)| percent_decode_str(f).decode_utf8_lossy().trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| host.clone());
+        return Some(Server {
+            name,
+            host,
+            port,
+            link: l.to_string(),
+            ping: None,
+        });
+    }
+    let u = Url::parse(l).ok()?;
     let scheme = u.scheme();
     if scheme != "vless" && scheme != "trojan" && scheme != "hysteria2" && scheme != "hy2" {
         return None;
@@ -511,7 +568,7 @@ pub fn parse_server(link: &str) -> Option<Server> {
         name: if name.is_empty() { host.clone() } else { name },
         host,
         port,
-        link: link.trim().to_string(),
+        link: l.to_string(),
         ping: None,
     })
 }
@@ -829,12 +886,82 @@ pub fn hysteria2_outbound(link: &str) -> Result<Value, String> {
     Ok(out)
 }
 
+fn decode_base64_loose(s: &str) -> Option<String> {
+    let clean: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    for eng in [&STANDARD, &STANDARD_NO_PAD, &URL_SAFE, &URL_SAFE_NO_PAD] {
+        if let Ok(bytes) = eng.decode(clean.as_bytes()) {
+            if let Ok(text) = String::from_utf8(bytes) {
+                return Some(text);
+            }
+        }
+    }
+    None
+}
+
+pub fn parse_shadowsocks(link: &str) -> Result<Value, String> {
+    let l = link.trim();
+    if !l.starts_with("ss://") {
+        return Err("Нужна ссылка ss://".into());
+    }
+    let rest = &l[5..];
+    let (body, _frag) = rest.split_once('#').unwrap_or((rest, ""));
+    let (main_part, _query) = body.split_once('?').unwrap_or((body, ""));
+
+    let (user_info, host_port) = if let Some((u, hp)) = main_part.split_once('@') {
+        let decoded_user = decode_base64_loose(u).unwrap_or_else(|| u.to_string());
+        (decoded_user, hp.to_string())
+    } else {
+        let decoded = decode_base64_loose(main_part)
+            .ok_or_else(|| "Не удалось декодировать base64 в ss://".to_string())?;
+        let (u, hp) = decoded
+            .split_once('@')
+            .ok_or_else(|| "В ссылке ss:// нет @".to_string())?;
+        (u.to_string(), hp.to_string())
+    };
+
+    let (method, password) = user_info
+        .split_once(':')
+        .ok_or_else(|| "В ссылке ss:// нет метода или пароля (method:password)".to_string())?;
+
+    let host_port = host_port.trim_end_matches('/');
+    let (host, port) = if host_port.starts_with('[') {
+        let (h, p) = host_port[1..]
+            .split_once(']')
+            .ok_or_else(|| "Неверный IPv6 в ss://".to_string())?;
+        let port: u16 = p.trim_start_matches(':').parse().unwrap_or(8388);
+        (h.to_string(), port)
+    } else if let Some((h, p)) = host_port.rsplit_once(':') {
+        let port: u16 = p.parse().unwrap_or(8388);
+        (h.to_string(), port)
+    } else {
+        (host_port.to_string(), 8388)
+    };
+
+    if host.is_empty() {
+        return Err("В ссылке ss:// нет адреса сервера".into());
+    }
+
+    Ok(json!({
+        "type": "shadowsocks",
+        "tag": "proxy",
+        "server": host,
+        "server_port": port,
+        "method": method,
+        "password": password
+    }))
+}
+
 pub fn native_outbound(link: &str) -> Result<Value, String> {
-    let u = Url::parse(link.trim()).map_err(|e| format!("Неверная ссылка: {e}"))?;
+    let l = link.trim();
+    if l.starts_with("ss://") {
+        return parse_shadowsocks(l);
+    }
+    let u = Url::parse(l).map_err(|e| format!("Неверная ссылка: {e}"))?;
     match u.scheme() {
-        "vless" => vless_outbound(link),
-        "trojan" => trojan_outbound(link),
-        "hysteria2" | "hy2" => hysteria2_outbound(link),
+        "vless" => vless_outbound(l),
+        "trojan" => trojan_outbound(l),
+        "hysteria2" | "hy2" => hysteria2_outbound(l),
+        "ss" => parse_shadowsocks(l),
         other => Err(format!("Протокол {other} не поддерживается")),
     }
 }
@@ -1411,17 +1538,25 @@ pub fn build_config(outbound: Value, bypass_ru: bool, verbose: bool) -> Value {
             "final": "remote",
             "strategy": "ipv4_only"
         },
-        "inbounds": [{
-            "type": "tun",
-            "tag": "tun-in",
-            "address": ["172.19.0.1/30"],
-            "auto_route": true,
-            "strict_route": true,
-            "stack": "mixed"
-        }],
+        "inbounds": [
+            json!({
+                "type": "tun",
+                "tag": "tun-in",
+                "address": ["172.19.0.1/30"],
+                "auto_route": true,
+                "strict_route": true,
+                "stack": "mixed"
+            }),
+            json!({
+                "type": "mixed",
+                "tag": "mixed-in",
+                "listen": "127.0.0.1",
+                "listen_port": 2080
+            })
+        ],
         "outbounds": [
             outbound,
-            { "type": "direct", "tag": "direct" }
+            json!({ "type": "direct", "tag": "direct" })
         ],
         "route": {
             "auto_detect_interface": true,
@@ -1430,6 +1565,88 @@ pub fn build_config(outbound: Value, bypass_ru: bool, verbose: bool) -> Value {
             "rules": route_rules
         }
     })
+}
+
+pub fn apply_settings(cfg: &mut Value, s: &Settings) {
+    if s.ai_unlock {
+        if let Some(rules) = cfg["dns"]["rules"].as_array_mut() {
+            rules.push(json!({ "domain_suffix": AI_DOMAINS, "action": "route", "server": "remote" }));
+        }
+        if let Some(rules) = cfg["route"]["rules"].as_array_mut() {
+            rules.push(json!({ "domain_suffix": AI_DOMAINS, "action": "route", "outbound": "proxy" }));
+        }
+    }
+
+    if !s.custom_direct.is_empty() {
+        let (domains, ips): (Vec<_>, Vec<_>) = s.custom_direct.iter()
+            .map(|x| x.trim())
+            .filter(|x| !x.is_empty())
+            .partition(|x| !x.contains('/') && x.parse::<std::net::IpAddr>().is_err());
+        if !domains.is_empty() {
+            if let Some(rules) = cfg["dns"]["rules"].as_array_mut() {
+                rules.push(json!({ "domain_suffix": domains, "action": "route", "server": "local" }));
+            }
+            if let Some(rules) = cfg["route"]["rules"].as_array_mut() {
+                rules.push(json!({ "domain_suffix": domains, "action": "route", "outbound": "direct" }));
+            }
+        }
+        if !ips.is_empty() {
+            if let Some(rules) = cfg["route"]["rules"].as_array_mut() {
+                rules.push(json!({ "ip_cidr": ips, "action": "route", "outbound": "direct" }));
+            }
+        }
+    }
+
+    if !s.custom_proxy.is_empty() {
+        let (domains, ips): (Vec<_>, Vec<_>) = s.custom_proxy.iter()
+            .map(|x| x.trim())
+            .filter(|x| !x.is_empty())
+            .partition(|x| !x.contains('/') && x.parse::<std::net::IpAddr>().is_err());
+        if !domains.is_empty() {
+            if let Some(rules) = cfg["dns"]["rules"].as_array_mut() {
+                rules.push(json!({ "domain_suffix": domains, "action": "route", "server": "remote" }));
+            }
+            if let Some(rules) = cfg["route"]["rules"].as_array_mut() {
+                rules.push(json!({ "domain_suffix": domains, "action": "route", "outbound": "proxy" }));
+            }
+        }
+        if !ips.is_empty() {
+            if let Some(rules) = cfg["route"]["rules"].as_array_mut() {
+                rules.push(json!({ "ip_cidr": ips, "action": "route", "outbound": "proxy" }));
+            }
+        }
+    }
+
+    if s.fragment {
+        if let Some(obs) = cfg["outbounds"].as_array_mut() {
+            for ob in obs.iter_mut() {
+                if let Some(tls) = ob.get_mut("tls") {
+                    if tls.is_object() {
+                        tls["fragment"] = json!(true);
+                        tls["record_fragment"] = json!(true);
+                        tls["fragment_fallback_delay"] = json!("500ms");
+                    }
+                }
+            }
+        }
+    }
+
+    if s.kill_switch {
+        if let Some(inbounds) = cfg["inbounds"].as_array_mut() {
+            for ib in inbounds.iter_mut() {
+                if ib["type"] == "tun" {
+                    ib["strict_route"] = json!(true);
+                }
+            }
+        }
+        if let Some(rules) = cfg["route"]["rules"].as_array_mut() {
+            rules.push(json!({
+                "ip_is_private": false,
+                "action": "route",
+                "outbound": "proxy"
+            }));
+        }
+    }
 }
 
 // ───────────────────────── процесс ядра ─────────────────────────
@@ -1692,6 +1909,7 @@ fn launch_core(core: &std::path::Path, core_dir: &std::path::Path, dir: &std::pa
     API_PORT.store(api, Ordering::Relaxed);
     apply_extras(&mut cfg, &s.bypass_apps, api);
     apply_saver(&mut cfg, s.saver);
+    apply_settings(&mut cfg, s);
     let cfg_path = dir.join("config.json");
     fs::write(&cfg_path, serde_json::to_string_pretty(&cfg).unwrap_or_default())
         .map_err(|e| format!("Не записался config.json: {e}"))?;
@@ -2298,5 +2516,91 @@ mod tests {
         assert_eq!(s.conns.len(), 2);
         assert_eq!(s.conns[0].process, "C:\\x\\chrome.exe");
         assert_eq!(s.conns[1].process, "");
+    }
+
+    #[test]
+    fn parses_shadowsocks_formats() {
+        // Unencoded SIP002
+        let l1 = "ss://2022-blake3-aes-128-gcm:mysecret123@ss.example.com:8388#MySS2022";
+        let s1 = parse_server(l1).unwrap();
+        assert_eq!(s1.name, "MySS2022");
+        assert_eq!(s1.host, "ss.example.com");
+        assert_eq!(s1.port, 8388);
+        let o1 = native_outbound(l1).unwrap();
+        assert_eq!(o1["type"], "shadowsocks");
+        assert_eq!(o1["method"], "2022-blake3-aes-128-gcm");
+        assert_eq!(o1["password"], "mysecret123");
+
+        // Base64 user_info SIP002 (aes-256-gcm:password)
+        let l2 = "ss://YWVzLTI1Ni1nY206cGFzc3dvcmQ=@1.2.3.4:9000#EncodedUser";
+        let s2 = parse_server(l2).unwrap();
+        assert_eq!(s2.name, "EncodedUser");
+        assert_eq!(s2.host, "1.2.3.4");
+        assert_eq!(s2.port, 9000);
+        let o2 = native_outbound(l2).unwrap();
+        assert_eq!(o2["method"], "aes-256-gcm");
+        assert_eq!(o2["password"], "password");
+
+        // Legacy base64 (chacha20-ietf-poly1305:secret@8.8.4.4:8388)
+        // chacha20-ietf-poly1305:secret@8.8.4.4:8388 in b64 is Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNTpzZWNyZXRAOC44LjQuNDo4Mzg4
+        let l3 = "ss://Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNTpzZWNyZXRAOC44LjQuNDo4Mzg4#LegacySS";
+        let s3 = parse_server(l3).unwrap();
+        assert_eq!(s3.name, "LegacySS");
+        assert_eq!(s3.host, "8.8.4.4");
+        assert_eq!(s3.port, 8388);
+        let o3 = native_outbound(l3).unwrap();
+        assert_eq!(o3["method"], "chacha20-ietf-poly1305");
+        assert_eq!(o3["password"], "secret");
+    }
+
+    #[test]
+    fn mixed_inbound_present_for_local_proxy() {
+        let o = vless_outbound(LINK).unwrap();
+        let cfg = build_config(o, true, false);
+        let inbounds = cfg["inbounds"].as_array().unwrap();
+        assert_eq!(inbounds.len(), 2);
+        assert_eq!(inbounds[0]["type"], "tun");
+        assert_eq!(inbounds[1]["type"], "mixed");
+        assert_eq!(inbounds[1]["listen"], "127.0.0.1");
+        assert_eq!(inbounds[1]["listen_port"], 2080);
+    }
+
+    #[test]
+    fn apply_settings_full_coverage() {
+        let o = vless_outbound(LINK).unwrap();
+        let mut cfg = build_config(o, true, false);
+        let mut s = Settings::default();
+        s.ai_unlock = true;
+        s.fragment = true;
+        s.kill_switch = true;
+        s.custom_direct = vec!["custom-direct.org".into(), "192.168.1.0/24".into()];
+        s.custom_proxy = vec!["custom-blocked.com".into(), "198.51.100.1".into()];
+
+        apply_settings(&mut cfg, &s);
+
+        // Check TLS fragmentation on proxy outbound
+        let ob = &cfg["outbounds"][0];
+        assert_eq!(ob["tls"]["fragment"], true);
+        assert_eq!(ob["tls"]["record_fragment"], true);
+        assert_eq!(ob["tls"]["fragment_fallback_delay"], "500ms");
+
+        // Check TUN inbound strict route
+        assert_eq!(cfg["inbounds"][0]["strict_route"], true);
+
+        // Check DNS rules for AI and custom rules
+        let dns = cfg["dns"]["rules"].as_array().unwrap();
+        assert!(dns.iter().any(|r| r["action"] == "route" && r["server"] == "remote" && r["domain_suffix"] == json!(AI_DOMAINS)));
+        assert!(dns.iter().any(|r| r["action"] == "route" && r["server"] == "local" && r["domain_suffix"] == json!(["custom-direct.org"])));
+        assert!(dns.iter().any(|r| r["action"] == "route" && r["server"] == "remote" && r["domain_suffix"] == json!(["custom-blocked.com"])));
+
+        // Check Route rules
+        let route = cfg["route"]["rules"].as_array().unwrap();
+        assert!(route.iter().any(|r| r["action"] == "route" && r["outbound"] == "proxy" && r["domain_suffix"] == json!(AI_DOMAINS)));
+        assert!(route.iter().any(|r| r["action"] == "route" && r["outbound"] == "direct" && r["domain_suffix"] == json!(["custom-direct.org"])));
+        assert!(route.iter().any(|r| r["action"] == "route" && r["outbound"] == "direct" && r["ip_cidr"] == json!(["192.168.1.0/24"])));
+        assert!(route.iter().any(|r| r["action"] == "route" && r["outbound"] == "proxy" && r["domain_suffix"] == json!(["custom-blocked.com"])));
+        assert!(route.iter().any(|r| r["action"] == "route" && r["outbound"] == "proxy" && r["ip_cidr"] == json!(["198.51.100.1"])));
+        // Kill switch rule
+        assert!(route.iter().any(|r| r["action"] == "route" && r["outbound"] == "proxy" && r["ip_is_private"] == false));
     }
 }

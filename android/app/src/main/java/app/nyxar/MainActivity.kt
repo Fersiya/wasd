@@ -308,7 +308,7 @@ class MainActivity : Activity() {
 
         linkInput = EditText(this).apply {
             setText(prefs.link)
-            hint = "vless://, trojan://, hy2:// или подписка"
+            hint = "vless://, trojan://, hy2://, ss:// или подписка"
             setHintTextColor(MUTED)
             setTextColor(TEXT)
             textSize = 13f
@@ -328,6 +328,21 @@ class MainActivity : Activity() {
             card(
                 toggle("Россия напрямую", ".ru, .su, .рф и местные сервисы идут мимо VPN", prefs.bypassRu) {
                     prefs.bypassRu = it
+                    restartIfActive()
+                },
+                divider(),
+                toggle("Разблокировать Google AI и Antigravity", "Gemini, AI Studio, ChatGPT, Claude всегда через VPN", prefs.aiUnlock) {
+                    prefs.aiUnlock = it
+                    restartIfActive()
+                },
+                divider(),
+                toggle("Обход блокировок ТСПУ (Фрагментация)", "TLS ClientHello fragmentation против DPI", prefs.fragment) {
+                    prefs.fragment = it
+                    restartIfActive()
+                },
+                divider(),
+                toggle("Блокировка трафика при обрыве (Kill Switch)", "Запрещает утечки в сеть при сбое или отключении туннеля", prefs.killSwitch) {
+                    prefs.killSwitch = it
                     restartIfActive()
                 },
                 divider(),

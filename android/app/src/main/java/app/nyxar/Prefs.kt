@@ -50,4 +50,29 @@ class Prefs(context: Context) {
     var sortPing: Boolean
         get() = sp.getBoolean("sort_ping", true)
         set(v) = sp.edit().putBoolean("sort_ping", v).apply()
+
+    /** Разблокировка Google AI, Antigravity, ChatGPT, Claude */
+    var aiUnlock: Boolean
+        get() = sp.getBoolean("ai_unlock", true)
+        set(v) = sp.edit().putBoolean("ai_unlock", v).apply()
+
+    /** Обход блокировок ТСПУ через фрагментацию TLS ClientHello */
+    var fragment: Boolean
+        get() = sp.getBoolean("fragment", true)
+        set(v) = sp.edit().putBoolean("fragment", v).apply()
+
+    /** Блокировка трафика при обрыве туннеля (Kill Switch) */
+    var killSwitch: Boolean
+        get() = sp.getBoolean("kill_switch", false)
+        set(v) = sp.edit().putBoolean("kill_switch", v).apply()
+
+    /** Пользовательские домены/IP напрямую (мимо VPN) */
+    var customDirect: Set<String>
+        get() = sp.getStringSet("custom_direct", emptySet())?.toSet() ?: emptySet()
+        set(v) = sp.edit().putStringSet("custom_direct", v).apply()
+
+    /** Пользовательские домены/IP всегда через VPN */
+    var customProxy: Set<String>
+        get() = sp.getStringSet("custom_proxy", emptySet())?.toSet() ?: emptySet()
+        set(v) = sp.edit().putStringSet("custom_proxy", v).apply()
 }

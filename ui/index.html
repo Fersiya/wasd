@@ -99,6 +99,19 @@
   .tile i { font-style: normal; color: var(--mute); font-size: 12px; font-weight: 400; }
   .tile.dim b { color: #5d6579; }
 
+  .speedcard { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; margin-top: 10px; animation: fadeUp .45s var(--ease) both; }
+  .speedhd { display: flex; align-items: center; justify-content: space-between; font-size: 11.5px; color: var(--mute); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 8px; }
+  .speedlegend { display: flex; align-items: center; gap: 10px; text-transform: none; font-size: 11px; letter-spacing: 0; }
+  .speedlegend i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
+  .leg-down { background: var(--a2); box-shadow: 0 0 6px rgba(34,211,238,.6); }
+  .leg-up { background: var(--a1); box-shadow: 0 0 6px rgba(109,91,255,.6); }
+  #speedgraph { width: 100%; height: 96px; display: block; border-radius: 8px; background: #0c0e14; }
+  .proxyinfo { margin-top: 10px; padding: 10px 12px; border-radius: 10px; background: rgba(109,91,255,.07); border: 1px solid rgba(109,91,255,.2); font-size: 12.5px; }
+  .pxtitle { color: var(--mute); font-size: 11.5px; margin-bottom: 4px; }
+  #pxaddr { font-family: Consolas, monospace; font-size: 13.5px; font-weight: 600; color: #a5f3fc; }
+  .ruletext { height: 60px; font-size: 11.5px; font-family: Consolas, monospace; margin-top: 4px; }
+  .lbl { font-size: 12px; color: var(--mute); font-weight: 500; }
+
   .quick { display: flex; align-items: center; gap: 12px; margin-top: 12px; width: 100%; text-align: left; color: var(--text); font: inherit; cursor: pointer;
     background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; transition: border-color .2s, transform .15s var(--ease); animation: fadeUp .5s var(--ease) .2s both; }
   .quick:hover { border-color: var(--a1); transform: translateY(-1px); }
@@ -260,6 +273,14 @@
       <div class="tile dim" id="t-time"><small>В сети</small><b id="v-time">—</b></div>
     </div>
 
+    <div class="speedcard" id="speedcard">
+      <div class="speedhd">
+        <span>График скорости</span>
+        <span class="speedlegend"><i class="leg-down"></i> Скачивание <i class="leg-up"></i> Отправка</span>
+      </div>
+      <canvas id="speedgraph" width="520" height="96"></canvas>
+    </div>
+
     <button class="quick" id="gosrv">
       <span><b id="q-name">Сервер</b><small id="q-sub"></small></span><em>›</em>
     </button>
@@ -282,7 +303,7 @@
     </section>
     <section class="card">
       <div class="hd"><h3>Ссылка или подписка</h3></div>
-      <textarea id="link" spellcheck="false" placeholder="vless://… или адрес подписки"></textarea>
+      <textarea id="link" spellcheck="false" placeholder="vless://, trojan://, hysteria2://, ss:// или адрес подписки"></textarea>
       <button class="primary" id="save">Сохранить и подключить</button>
     </section>
   </section>
@@ -300,6 +321,10 @@
         <span class="sw"><input type="checkbox" id="auto_switch"><i></i></span></label>
       <label class="t"><span>Подключаться при запуске</span>
         <span class="sw"><input type="checkbox" id="autoconnect"><i></i></span></label>
+      <label class="t"><span>Обход блокировок ТСПУ (Фрагментация)<small>TLS ClientHello fragmentation обходит блокировки РКН / ТСПУ на уровне DPI</small></span>
+        <span class="sw"><input type="checkbox" id="fragment"><i></i></span></label>
+      <label class="t"><span>Блокировка трафика при обрыве (Kill Switch)<small>запрещает утечки в открытую сеть при сбое или отключении туннеля</small></span>
+        <span class="sw"><input type="checkbox" id="kill_switch"><i></i></span></label>
     </section>
 
     <section class="card">
@@ -338,6 +363,30 @@
         <p class="hint">Нажми один раз и подтверди в Telegram. Прокси 127.0.0.1:1443 работает, пока Nyxar запущен.</p>
       </div>
       <div id="tgerr"></div>
+    </section>
+
+    <section class="card">
+      <div class="hd"><h3>Google AI & Antigravity</h3></div>
+      <label class="t"><span>Разблокировать Google AI и Antigravity<small>Gemini, Antigravity, AI Studio, ChatGPT, Claude всегда через VPN</small></span>
+        <span class="sw"><input type="checkbox" id="ai_unlock"><i></i></span></label>
+      <div class="proxyinfo">
+        <div class="pxtitle">Встроенный локальный прокси (Mixed HTTP & SOCKS5):</div>
+        <code id="pxaddr">127.0.0.1:2080</code>
+        <div class="btnrow" style="margin-top:8px">
+          <button class="ghost" id="copy_proxy_addr">Копировать адрес</button>
+          <button class="ghost" id="copy_proxy_env">Копировать HTTP_PROXY</button>
+        </div>
+        <p class="hint">Укажи этот прокси в настройках Antigravity или переменных окружения для бесплатной работы без сторонних платных прокси.</p>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="hd"><h3>Свои правила маршрутизации</h3></div>
+      <div class="lbl">Всегда напрямую (мимо VPN):</div>
+      <textarea id="custom_direct" class="ruletext" placeholder="домены или IP-адреса через запятую, например: 2gis.ru, 192.168.1.0/24" spellcheck="false"></textarea>
+      <div class="lbl" style="margin-top:8px">Всегда через VPN:</div>
+      <textarea id="custom_proxy" class="ruletext" placeholder="домены или IP-адреса через запятую, например: blocked-site.com, 1.2.3.4" spellcheck="false"></textarea>
+      <button class="primary" id="save_custom_rules" style="margin-top:8px">Сохранить правила</button>
     </section>
 
     <section class="card">
@@ -556,6 +605,74 @@
   $('appdone').onclick = () => { $('modal').classList.remove('on'); apps = [...pick]; send({ cmd: 'apps', list: apps }); };
   $('modal').onclick = (e) => { if (e.target === $('modal')) $('modal').classList.remove('on'); };
 
+  // ───── график скорости ─────
+  const speedHistory = [];
+  const MAX_HISTORY = 40;
+  function updateSpeedGraph(down, up, on) {
+    const canvas = $('speedgraph');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    speedHistory.push({ down: on ? (down || 0) : 0, up: on ? (up || 0) : 0 });
+    if (speedHistory.length > MAX_HISTORY) speedHistory.shift();
+
+    const w = canvas.width, h = canvas.height;
+    ctx.clearRect(0, 0, w, h);
+
+    ctx.strokeStyle = '#1b1f2d';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, h * 0.33); ctx.lineTo(w, h * 0.33);
+    ctx.moveTo(0, h * 0.66); ctx.lineTo(w, h * 0.66);
+    ctx.stroke();
+
+    if (speedHistory.length < 2) return;
+
+    const maxVal = Math.max(1024 * 50, ...speedHistory.map((p) => Math.max(p.down, p.up)));
+
+    function drawLine(key, color, fillGrad) {
+      ctx.beginPath();
+      const step = w / (MAX_HISTORY - 1);
+      const startX = w - (speedHistory.length - 1) * step;
+
+      speedHistory.forEach((pt, i) => {
+        const x = startX + i * step;
+        const y = h - 6 - (pt[key] / maxVal) * (h - 16);
+        if (i === 0) ctx.moveTo(x, y);
+        else {
+          const prevX = startX + (i - 1) * step;
+          const prevY = h - 6 - (speedHistory[i - 1][key] / maxVal) * (h - 16);
+          const cx = (prevX + x) / 2;
+          ctx.bezierCurveTo(cx, prevY, cx, y, x, y);
+        }
+      });
+
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      if (fillGrad && on) {
+        ctx.lineTo(w, h);
+        ctx.lineTo(startX, h);
+        ctx.closePath();
+        ctx.fillStyle = fillGrad;
+        ctx.fill();
+      }
+    }
+
+    const gradDown = ctx.createLinearGradient(0, 0, 0, h);
+    gradDown.addColorStop(0, 'rgba(34, 211, 238, 0.25)');
+    gradDown.addColorStop(1, 'rgba(34, 211, 238, 0.0)');
+
+    const gradUp = ctx.createLinearGradient(0, 0, 0, h);
+    gradUp.addColorStop(0, 'rgba(109, 91, 255, 0.2)');
+    gradUp.addColorStop(1, 'rgba(109, 91, 255, 0.0)');
+
+    drawLine('down', '#22d3ee', gradDown);
+    drawLine('up', '#6d5bff', gradUp);
+  }
+
   // ───── состояние от программы ─────
   function setStat(id, html, on) { const el = $(id); if (el.innerHTML !== html) el.innerHTML = html; el.parentElement.classList.toggle('dim', !on); }
 
@@ -613,8 +730,13 @@
     setStat('v-up', on ? speed(s.up_speed) : '—', on);
     setStat('v-total', on ? size(s.down + s.up) : '—', on);
     setStat('v-time', on ? dur(s.uptime) : '—', on);
+    updateSpeedGraph(s.down_speed, s.up_speed, on);
 
-    ['bypass_ru', 'autostart', 'autoconnect', 'auto_update', 'verbose', 'tg_proxy', 'auto_switch', 'smart', 'saver'].forEach((k) => { $(k).checked = !!s[k]; });
+    ['bypass_ru', 'autostart', 'autoconnect', 'auto_update', 'verbose', 'tg_proxy', 'auto_switch', 'smart', 'saver', 'ai_unlock', 'fragment', 'kill_switch'].forEach((k) => { $(k).checked = !!s[k]; });
+    if (first || (document.activeElement !== $('custom_direct') && document.activeElement !== $('custom_proxy'))) {
+      if (s.custom_direct) $('custom_direct').value = s.custom_direct.join('\n');
+      if (s.custom_proxy) $('custom_proxy').value = s.custom_proxy.join('\n');
+    }
     tgLink = s.tg_link || '';
     $('tgbox').style.display = s.tg_proxy ? 'block' : 'none';
     $('tgerr').style.display = s.tg_error ? 'block' : 'none';
@@ -656,7 +778,15 @@
     try { navigator.clipboard.writeText(t).then(done, fb); } catch (e) { fb(); }
   }
   $('tgcopy').onclick = () => copyText(tgLink, () => { $('tgcopy').textContent = 'Скопировано'; setTimeout(() => { $('tgcopy').textContent = 'Копировать ссылку'; }, 1500); });
-  ['bypass_ru', 'autostart', 'autoconnect', 'auto_update', 'verbose', 'tg_proxy', 'auto_switch', 'smart', 'saver'].forEach((k) =>
+  $('copy_proxy_addr').onclick = () => copyText('127.0.0.1:2080', () => { $('copy_proxy_addr').textContent = 'Скопировано'; setTimeout(() => { $('copy_proxy_addr').textContent = 'Копировать адрес'; }, 1500); });
+  $('copy_proxy_env').onclick = () => copyText('HTTP_PROXY=http://127.0.0.1:2080\nHTTPS_PROXY=http://127.0.0.1:2080', () => { $('copy_proxy_env').textContent = 'Скопировано'; setTimeout(() => { $('copy_proxy_env').textContent = 'Копировать HTTP_PROXY'; }, 1500); });
+  $('save_custom_rules').onclick = () => {
+    const parse = (v) => v.split(/[\n,]/).map((x) => x.trim()).filter(Boolean);
+    send({ cmd: 'custom_rules', direct: parse($('custom_direct').value), proxy: parse($('custom_proxy').value) });
+    $('save_custom_rules').textContent = 'Сохранено';
+    setTimeout(() => { $('save_custom_rules').textContent = 'Сохранить правила'; }, 1500);
+  };
+  ['bypass_ru', 'autostart', 'autoconnect', 'auto_update', 'verbose', 'tg_proxy', 'auto_switch', 'smart', 'saver', 'ai_unlock', 'fragment', 'kill_switch'].forEach((k) =>
     $(k).onchange = (e) => send({ cmd: 'set', key: k, value: e.target.checked }));
   sortLabel();
   $('sortbtn').onclick = () => {
