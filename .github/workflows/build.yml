@@ -24,29 +24,51 @@ jobs:
       # sing-box, wintun и libcronet скачиваются и вшиваются в nyxar.exe (gzip) -> единый файл
       - name: Fetch core and pack into assets
         shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory assets, core -Force | Out-Null
 
-          $rel = Invoke-RestMethod https://api.github.com/repos/SagerNet/sing-box/releases/latest
-          $asset = $rel.assets | Where-Object { $_.name -like '*windows-amd64.zip' } | Select-Object -First 1
-          Write-Host "sing-box:" $asset.name
-          Invoke-WebRequest $asset.browser_download_url -OutFile sb.zip
+          $headers = @{ "User-Agent" = "Nyxar-CI" }
+          if ($env:GITHUB_TOKEN) {
+            $headers["Authorization"] = "Bearer $env:GITHUB_TOKEN"
+          }
+
+          # 1. sing-box
+          try {
+            $rel = Invoke-RestMethod https://api.github.com/repos/SagerNet/sing-box/releases/latest -Headers $headers
+            $asset = $rel.assets | Where-Object { $_.name -like '*windows-amd64.zip' } | Select-Object -First 1
+            $sb_url = $asset.browser_download_url
+          } catch {
+            $sb_url = "https://github.com/SagerNet/sing-box/releases/download/v1.11.4/sing-box-1.11.4-windows-amd64.zip"
+          }
+          Write-Host "sing-box:" $sb_url
+          Invoke-WebRequest $sb_url -OutFile sb.zip
           Expand-Archive sb.zip -DestinationPath sb_tmp -Force
           $exe = Get-ChildItem sb_tmp -Filter sing-box.exe -Recurse | Select-Object -First 1
           Copy-Item $exe.FullName core\sing-box.exe
           $cronet = Join-Path $exe.DirectoryName 'libcronet.dll'
           if (Test-Path $cronet) { Copy-Item $cronet core\libcronet.dll } else { New-Item core\libcronet.dll -ItemType File | Out-Null }
 
+          # 2. wintun
           Invoke-WebRequest https://www.wintun.net/builds/wintun-0.14.1.zip -OutFile wintun.zip
           Expand-Archive wintun.zip -DestinationPath wintun_tmp -Force
           Copy-Item wintun_tmp\wintun\bin\amd64\wintun.dll core\wintun.dll
 
-          # Xray-core: нужен для серверов xhttp и VLESS encryption, которые sing-box не умеет
-          $xr = Invoke-RestMethod https://api.github.com/repos/XTLS/Xray-core/releases/latest
-          $xa = $xr.assets | Where-Object { $_.name -eq 'Xray-windows-64.zip' } | Select-Object -First 1
-          Write-Host "xray:" $xr.tag_name
-          Invoke-WebRequest $xa.browser_download_url -OutFile xray.zip
+          # 3. Xray-core
+          try {
+            $xr = Invoke-RestMethod https://api.github.com/repos/XTLS/Xray-core/releases/latest -Headers $headers
+            $xa = $xr.assets | Where-Object { $_.name -eq 'Xray-windows-64.zip' } | Select-Object -First 1
+            $xr_url = $xa.browser_download_url
+          } catch {
+            $xr_url = "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-windows-64.zip"
+          }
+          if (-not $xr_url) {
+            $xr_url = "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-windows-64.zip"
+          }
+          Write-Host "xray:" $xr_url
+          Invoke-WebRequest $xr_url -OutFile xray.zip
           Expand-Archive xray.zip -DestinationPath xray_tmp -Force
           Copy-Item xray_tmp\xray.exe core\xray.exe
 
