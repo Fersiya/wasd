@@ -55,15 +55,28 @@ object Engine {
         "2gis.com", "kinopoisk.dev",
     )
 
-    /** Домены AI сервисов (Gemini, Antigravity, ChatGPT, Claude) для принудительного пропуска через VPN */
+    /** Домены AI сервисов (Antigravity, Gemini, ChatGPT, Claude) для принудительного пропуска через VPN */
     val AI_DOMAINS = listOf(
+        "daily-cloudcode-pa.googleapis.com",
+        "cloudcode-pa.googleapis.com",
+        "cloudaicompanion.googleapis.com",
+        "aicode.googleapis.com",
+        "oauth2.googleapis.com",
+        "cloudresourcemanager.googleapis.com",
+        "iamcredentials.googleapis.com",
+        "serviceusage.googleapis.com",
+        "developerconnect.googleapis.com",
         "generativelanguage.googleapis.com",
         "alkalimakersuite-pa.clients6.google.com",
+        "proactivebackend-pa.googleapis.com",
         "aistudio.google.com",
         "deepmind.google",
         "gemini.google.com",
         "ai.google.dev",
-        "proactivebackend-pa.googleapis.com",
+        "play.googleapis.com",
+        "googleapis.com",
+        "clients6.google.com",
+        "run.app",
         "openai.com",
         "chatgpt.com",
         "oaistatic.com",

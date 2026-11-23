@@ -27,15 +27,28 @@ pub const RU_DIRECT: &[&str] = &[
     "2gis.com", "kinopoisk.dev",
 ];
 
-/// Домены AI сервисов (Gemini, Antigravity, ChatGPT, Claude) для принудительного пропуска через VPN
+/// Домены AI сервисов (Antigravity, Gemini, ChatGPT, Claude) для принудительного пропуска через VPN
 pub const AI_DOMAINS: &[&str] = &[
+    "daily-cloudcode-pa.googleapis.com",
+    "cloudcode-pa.googleapis.com",
+    "cloudaicompanion.googleapis.com",
+    "aicode.googleapis.com",
+    "oauth2.googleapis.com",
+    "cloudresourcemanager.googleapis.com",
+    "iamcredentials.googleapis.com",
+    "serviceusage.googleapis.com",
+    "developerconnect.googleapis.com",
     "generativelanguage.googleapis.com",
     "alkalimakersuite-pa.clients6.google.com",
+    "proactivebackend-pa.googleapis.com",
     "aistudio.google.com",
     "deepmind.google",
     "gemini.google.com",
     "ai.google.dev",
-    "proactivebackend-pa.googleapis.com",
+    "play.googleapis.com",
+    "googleapis.com",
+    "clients6.google.com",
+    "run.app",
     "openai.com",
     "chatgpt.com",
     "oaistatic.com",
@@ -1118,6 +1131,24 @@ pub fn xray_config(outbound: Value, port: u16, verbose: bool) -> Value {
     })
 }
 
+/// Локальный IP-адрес сетевого интерфейса по умолчанию для указанного целевого адреса.
+/// Используется для привязки исходящих сокетов Xray (sendThrough), чтобы избежать
+/// попадания его трафика в Wintun адаптер sing-box.
+pub fn local_outbound_ip(target: std::net::IpAddr) -> Option<std::net::IpAddr> {
+    match target {
+        std::net::IpAddr::V4(_) => {
+            let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+            socket.connect((target, 80)).ok()?;
+            socket.local_addr().ok().map(|a| a.ip())
+        }
+        std::net::IpAddr::V6(_) => {
+            let socket = std::net::UdpSocket::bind("[::]:0").ok()?;
+            socket.connect((target, 80)).ok()?;
+            socket.local_addr().ok().map(|a| a.ip())
+        }
+    }
+}
+
 /// Что добавить к конфигу sing-box, когда сервер работает через Xray.
 pub struct Sidecar {
     pub xray_cfg: Value,
@@ -1127,7 +1158,11 @@ pub struct Sidecar {
 }
 
 pub fn sidecar_plan(link: &str, ip: std::net::IpAddr, port: u16, verbose: bool) -> Result<Sidecar, String> {
-    let xray_cfg = xray_config(xray_outbound(link, Some(&ip.to_string()))?, port, verbose);
+    let mut ob = xray_outbound(link, Some(&ip.to_string()))?;
+    if let Some(lip) = local_outbound_ip(ip) {
+        ob["sendThrough"] = json!(lip.to_string());
+    }
+    let xray_cfg = xray_config(ob, port, verbose);
     let cidr = match ip {
         std::net::IpAddr::V4(_) => format!("{ip}/32"),
         std::net::IpAddr::V6(_) => format!("{ip}/128"),
@@ -1796,6 +1831,9 @@ pub fn smart_plan(
                 let ip = resolve(&v.host, v.port)?;
                 let port = next_port()?;
                 let mut xo = xray_outbound(&sv.link, Some(&ip.to_string()))?;
+                if let Some(lip) = local_outbound_ip(ip) {
+                    xo["sendThrough"] = json!(lip.to_string());
+                }
                 xo["tag"] = json!(format!("o{i}"));
                 let inbound = json!({
                     "tag": format!("i{i}"), "listen": "127.0.0.1", "port": port, "protocol": "socks",
