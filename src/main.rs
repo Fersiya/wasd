@@ -1,4 +1,5 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+#![recursion_limit = "512"]
 
 mod engine;
 mod probe;
@@ -133,14 +134,24 @@ impl App {
     }
 
     fn json(&self) -> String {
+        let servers: Vec<Value> = self.servers.iter()
+            .map(|s| json!({ "key": s.key(), "name": s.name, "ping": s.ping }))
+            .collect();
+        let top_apps: Vec<Value> = self.usage.top(8).into_iter()
+            .map(|(name, bytes)| {
+                let bypass = self.settings.bypass_apps.iter().any(|a| a.eq_ignore_ascii_case(&name));
+                json!({ "name": name, "bytes": bytes, "bypass": bypass })
+            })
+            .collect();
+        let update_val = self.update.as_ref()
+            .map(|r| json!({ "version": r.version, "busy": self.update_busy }));
+
         json!({
             "status": self.st.key(),
             "status_text": self.st.text(),
             "sub": self.sub(),
             "error": self.error,
-            "servers": self.servers.iter()
-                .map(|s| json!({ "key": s.key(), "name": s.name, "ping": s.ping }))
-                .collect::<Vec<_>>(),
+            "servers": servers,
             "refreshing": self.refreshing,
             "selected": self.settings.server,
             "connected_key": if self.st == St::On { self.server_key.clone() } else { String::new() },
@@ -165,12 +176,7 @@ impl App {
             "custom_proxy": self.settings.custom_proxy,
             "limit_mb": self.settings.limit_mb,
             "month_bytes": self.usage.total,
-            "top_apps": self.usage.top(8).into_iter()
-                .map(|(name, bytes)| {
-                    let bypass = self.settings.bypass_apps.iter().any(|a| a.eq_ignore_ascii_case(&name));
-                    json!({ "name": name, "bytes": bytes, "bypass": bypass })
-                })
-                .collect::<Vec<_>>(),
+            "top_apps": top_apps,
             "up": self.traffic.0,
             "down": self.traffic.1,
             "up_speed": self.speed.0,
@@ -180,8 +186,7 @@ impl App {
             "tg_error": self.tg_error,
             "tg_link": if self.tg.is_some() { tgproxy::link(&self.settings.tg_secret) } else { String::new() },
             "link": self.settings.link,
-            "update": self.update.as_ref()
-                .map(|r| json!({ "version": r.version, "busy": self.update_busy })),
+            "update": update_val,
             "update_note": self.update_note,
             "version": env!("CARGO_PKG_VERSION"),
         })
