@@ -161,6 +161,10 @@
   .spin { display: inline-block; animation: rot .8s linear infinite; }
   @keyframes rot { to { transform: rotate(360deg); } }
 
+  .badge { font-size: 11px; padding: 2px 8px; border-radius: 6px; font-weight: 500; display: inline-flex; align-items: center; }
+  .badge.ok { color: #22c55e; background: rgba(34,197,94,.12); border: 1px solid rgba(34,197,94,.3); }
+  .badge.off { color: var(--mute); background: rgba(255,255,255,.05); border: 1px solid var(--line); }
+
   #srvlist { display: flex; flex-direction: column; gap: 4px; }
   .srv { display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 10px; cursor: pointer; border: 1px solid transparent;
     animation: fadeUp .4s var(--ease) both; animation-delay: calc(var(--i, 0) * 18ms); transition: background .2s, border-color .2s; }
@@ -369,14 +373,23 @@
       <div class="hd"><h3>Google AI & Antigravity</h3></div>
       <label class="t"><span>Разблокировать Google AI и Antigravity<small>Gemini, Antigravity, AI Studio, ChatGPT, Claude всегда через VPN</small></span>
         <span class="sw"><input type="checkbox" id="ai_unlock"><i></i></span></label>
+      <label class="t"><span>Автоматический системный прокси<small>Включать 127.0.0.1:2080 в Windows при подключении и сбрасывать при отключении</small></span>
+        <span class="sw"><input type="checkbox" id="system_proxy"><i></i></span></label>
       <div class="proxyinfo">
         <div class="pxtitle">Встроенный локальный прокси (Mixed HTTP & SOCKS5):</div>
-        <code id="pxaddr">127.0.0.1:2080</code>
+        <div style="display:flex;align-items:center;gap:10px;margin-top:4px">
+          <code id="pxaddr">127.0.0.1:2080</code>
+          <span id="sysproxy_badge" class="badge off">Не активен</span>
+        </div>
+        <div class="btnrow" style="margin-top:10px;gap:8px">
+          <button class="primary" id="btn_set_sysproxy" style="font-size:12px;padding:6px 12px;margin:0">Включить в Windows</button>
+          <button class="ghost" id="btn_clear_sysproxy" style="font-size:12px;padding:6px 12px">Сбросить прокси</button>
+        </div>
         <div class="btnrow" style="margin-top:8px">
           <button class="ghost" id="copy_proxy_addr">Копировать адрес</button>
           <button class="ghost" id="copy_proxy_env">Копировать HTTP_PROXY</button>
         </div>
-        <p class="hint">Укажи этот прокси в настройках Antigravity или переменных окружения для бесплатной работы без сторонних платных прокси.</p>
+        <p class="hint">Кнопка «Включить в Windows» настраивает системный прокси и переменные окружения для Antigravity и терминала в один клик. Кнопка «Сбросить» полностью возвращает настройки системы назад.</p>
       </div>
     </section>
 
@@ -732,7 +745,17 @@
     setStat('v-time', on ? dur(s.uptime) : '—', on);
     updateSpeedGraph(s.down_speed, s.up_speed, on);
 
-    ['bypass_ru', 'autostart', 'autoconnect', 'auto_update', 'verbose', 'tg_proxy', 'auto_switch', 'smart', 'saver', 'ai_unlock', 'fragment', 'kill_switch'].forEach((k) => { $(k).checked = !!s[k]; });
+    ['bypass_ru', 'autostart', 'autoconnect', 'auto_update', 'verbose', 'tg_proxy', 'auto_switch', 'smart', 'saver', 'ai_unlock', 'fragment', 'kill_switch', 'system_proxy'].forEach((k) => { if ($(k)) $(k).checked = !!s[k]; });
+    const sb = $('sysproxy_badge');
+    if (sb) {
+      if (s.sysproxy_active) {
+        sb.textContent = 'Включён в системе';
+        sb.className = 'badge ok';
+      } else {
+        sb.textContent = 'Не активен';
+        sb.className = 'badge off';
+      }
+    }
     if (first || (document.activeElement !== $('custom_direct') && document.activeElement !== $('custom_proxy'))) {
       if (s.custom_direct) $('custom_direct').value = s.custom_direct.join('\n');
       if (s.custom_proxy) $('custom_proxy').value = s.custom_proxy.join('\n');
@@ -780,14 +803,16 @@
   $('tgcopy').onclick = () => copyText(tgLink, () => { $('tgcopy').textContent = 'Скопировано'; setTimeout(() => { $('tgcopy').textContent = 'Копировать ссылку'; }, 1500); });
   $('copy_proxy_addr').onclick = () => copyText('127.0.0.1:2080', () => { $('copy_proxy_addr').textContent = 'Скопировано'; setTimeout(() => { $('copy_proxy_addr').textContent = 'Копировать адрес'; }, 1500); });
   $('copy_proxy_env').onclick = () => copyText('HTTP_PROXY=http://127.0.0.1:2080\nHTTPS_PROXY=http://127.0.0.1:2080', () => { $('copy_proxy_env').textContent = 'Скопировано'; setTimeout(() => { $('copy_proxy_env').textContent = 'Копировать HTTP_PROXY'; }, 1500); });
+  $('btn_set_sysproxy').onclick = () => send({ cmd: 'set_sysproxy' });
+  $('btn_clear_sysproxy').onclick = () => send({ cmd: 'clear_sysproxy' });
   $('save_custom_rules').onclick = () => {
     const parse = (v) => v.split(/[\n,]/).map((x) => x.trim()).filter(Boolean);
     send({ cmd: 'custom_rules', direct: parse($('custom_direct').value), proxy: parse($('custom_proxy').value) });
     $('save_custom_rules').textContent = 'Сохранено';
     setTimeout(() => { $('save_custom_rules').textContent = 'Сохранить правила'; }, 1500);
   };
-  ['bypass_ru', 'autostart', 'autoconnect', 'auto_update', 'verbose', 'tg_proxy', 'auto_switch', 'smart', 'saver', 'ai_unlock', 'fragment', 'kill_switch'].forEach((k) =>
-    $(k).onchange = (e) => send({ cmd: 'set', key: k, value: e.target.checked }));
+  ['bypass_ru', 'autostart', 'autoconnect', 'auto_update', 'verbose', 'tg_proxy', 'auto_switch', 'smart', 'saver', 'ai_unlock', 'fragment', 'kill_switch', 'system_proxy'].forEach((k) =>
+    $(k) && ($(k).onchange = (e) => send({ cmd: 'set', key: k, value: e.target.checked })));
   sortLabel();
   $('sortbtn').onclick = () => {
     sortMode = sortMode === 'ping' ? 'sub' : 'ping';

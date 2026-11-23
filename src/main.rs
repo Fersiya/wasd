@@ -3,6 +3,7 @@
 mod engine;
 mod probe;
 mod saver;
+mod sysproxy;
 mod tgproxy;
 mod update;
 
@@ -158,6 +159,8 @@ impl App {
             "ai_unlock": self.settings.ai_unlock,
             "fragment": self.settings.fragment,
             "kill_switch": self.settings.kill_switch,
+            "system_proxy": self.settings.system_proxy,
+            "sysproxy_active": sysproxy::sysproxy::is_enabled(),
             "custom_direct": self.settings.custom_direct,
             "custom_proxy": self.settings.custom_proxy,
             "limit_mb": self.settings.limit_mb,
@@ -405,6 +408,9 @@ fn restart(proxy: &EventLoopProxy<UserEvent>, app: &mut App) {
 
 fn toggle_connection(proxy: &EventLoopProxy<UserEvent>, app: &mut App) {
     if app.child.is_some() || app.st == St::Connecting {
+        if app.settings.system_proxy {
+            let _ = sysproxy::sysproxy::disable();
+        }
         app.usage.save(&engine::data_dir());
         let mut old_child = app.child.take();
         std::thread::spawn(move || {
@@ -648,6 +654,9 @@ fn main() {
             if let Some(c) = app.child.as_mut() {
                 if let Ok(Some(code)) = c.try_wait() {
                     app.child = None;
+                    if app.settings.system_proxy {
+                        let _ = sysproxy::sysproxy::disable();
+                    }
                     engine::stop_sidecar();
                     let tail = engine::log_tail(900);
                     app.error = if tail.is_empty() {
@@ -811,6 +820,7 @@ fn main() {
                     }
                     sync(&app, &tray, &status_item, &toggle_item, &win);
                 } else if e.id == *quit_item.id() {
+                    let _ = sysproxy::sysproxy::disable();
                     app.usage.save(&engine::data_dir());
                     engine::stop_core(&mut app.child);
                     win = None;
@@ -909,8 +919,25 @@ fn main() {
                                     restart(&proxy, &mut app);
                                 }
                             }
+                            "system_proxy" => {
+                                app.settings.system_proxy = on;
+                                engine::save_settings(&app.settings);
+                                if on && app.st == St::On {
+                                    let _ = sysproxy::sysproxy::enable("127.0.0.1:2080");
+                                } else if !on {
+                                    let _ = sysproxy::sysproxy::disable();
+                                }
+                            }
                             _ => {}
                         }
+                    }
+                    "set_sysproxy" => {
+                        let _ = sysproxy::sysproxy::enable("127.0.0.1:2080");
+                        sync(&app, &tray, &status_item, &toggle_item, &win);
+                    }
+                    "clear_sysproxy" => {
+                        let _ = sysproxy::sysproxy::disable();
+                        sync(&app, &tray, &status_item, &toggle_item, &win);
                     }
                     "custom_rules" => {
                         if let Some(direct) = v["direct"].as_array() {
@@ -1048,6 +1075,9 @@ fn main() {
                         app.server_key = key;
                         app.active_key = None;
                         app.st = St::On;
+                        if app.settings.system_proxy {
+                            let _ = sysproxy::sysproxy::enable("127.0.0.1:2080");
+                        }
                         app.error.clear();
                         app.connected_at = Some(Instant::now());
                         app.traffic = (0, 0);

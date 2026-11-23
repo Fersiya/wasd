@@ -122,6 +122,9 @@ pub struct Settings {
     /// Пользовательские домены/подсети всегда через VPN
     #[serde(default)]
     pub custom_proxy: Vec<String>,
+    /// Автоматически прописывать системный прокси Windows (127.0.0.1:2080)
+    #[serde(default)]
+    pub system_proxy: bool,
 }
 
 impl Default for Settings {
@@ -146,6 +149,7 @@ impl Default for Settings {
             kill_switch: false,
             custom_direct: Vec::new(),
             custom_proxy: Vec::new(),
+            system_proxy: false,
         }
     }
 }
